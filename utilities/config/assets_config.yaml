@@ -1,0 +1,25 @@
+# Asset Ingestion Configuration
+# Used by convert_objects.py to convert OBJs to USD assets with Physics and Semantics.
+
+# Global settings
+destination_dir: "/home/ubuntu/Workspace/data/ycb" # Where to save the converted USDs
+
+assets:
+  # Group 1: Standard YCB Dataset (Glob Pattern)
+  - name: "ycb_objects"
+    type: "glob"
+    # Search for files matching this pattern recursively
+    # The ** allows searching through any subdirectory structure
+    search_pattern: "/home/ubuntu/Workspace/data/ycb/**/tsdf/textured.obj"
+    # depth 2 means the object name is 2 folders up from the file
+    # e.g. .../073-f_lego_duplo/tsdf/textured.obj -> name is "073-f_lego_duplo"
+    name_depth: 2
+    scale: 0.001
+
+  # Group 2: Custom Items
+  - name: "custom"
+    type: "list"
+    items:
+      # - name: "my_cube"
+      #   path: "/path/to/cube.obj"
+      #   scale: 1.0

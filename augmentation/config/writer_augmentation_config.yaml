@@ -1,0 +1,38 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Configuration for writer-level augmentation example
+
+# Simulation settings
+simulation:
+  headless: false
+  renderer: RaytracedLighting
+
+# Rendering settings
+rendering:
+  dlss_mode: 2  # 0: Performance, 1: Balanced, 2: Quality, 3: Auto
+  resolution: [512, 512]
+  rt_subframes: 32
+
+# Scene configuration
+scene:
+  env_url: /Isaac/Environments/Grid/default_environment.usd
+  cube:
+    position: [0, 0, 0.71]
+    color: [1, 0, 0]  # Red (RGB normalized)
+  camera:
+    position: [0, 0, 5]
+    look_at: [0, 0, 0]
+
+# Augmentation parameters
+augmentation:
+  backend: numpy  # Options: numpy (CPU), warp (GPU)
+  gaussian_noise:
+    rgb_sigma: 15.0
+    depth_sigma: 0.1
+
+# Data generation
+data_generation:
+  num_frames: 25
+  output_dir: _out_augm_writer
+  material_load_updates: 5
