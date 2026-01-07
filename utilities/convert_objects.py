@@ -69,33 +69,102 @@ async def convert_asset_native(source_path, output_path):
         return False
     return True
 
+def parse_mtl(mtl_path):
+    """
+    Parses a simple MTL file for basic material properties.
+    Returns a dict with 'Kd', 'Ks', 'Ns', 'd', 'Ni', 'map_Kd'.
+    """
+    props = {
+        'Kd': (1.0, 1.0, 1.0), # Diffuse (Default White to ensure map_Kd works)
+        'Ks': None,            # Specular (Default None -> Let USD decide, usually 0)
+        'Ns': None,            # Shininess (Default None -> Let USD decide, usually 0.5 rough)
+        'd': 1.0,              # Opacity
+        'Ni': None,            # IOR
+        'map_Kd': None         # Texture map
+    }
+    
+    if not os.path.exists(mtl_path):
+        return props
+
+    try:
+        with open(mtl_path, 'r') as f:
+            for line in f:
+                parts = line.strip().split()
+                if not parts:
+                    continue
+                key = parts[0]
+                # Handle potential comments
+                if key.startswith("#"):
+                    continue
+                    
+                if key == 'Ks':
+                    props['Ks'] = (float(parts[1]), float(parts[2]), float(parts[3]))
+                elif key == 'Ns':
+                    props['Ns'] = float(parts[1])
+                elif key == 'd':
+                    props['d'] = float(parts[1])
+                elif key == 'Kd':
+                    props['Kd'] = (float(parts[1]), float(parts[2]), float(parts[3]))
+                elif key == 'Ni':
+                    props['Ni'] = float(parts[1])
+                elif key == 'map_Kd':
+                    # Can be multiple parts if spaces in filename, but usually last part
+                    # Or take the rest of the line ensuring to strip comments if any
+                    content = line.strip().split(' ', 1)[1]
+                    props['map_Kd'] = content.strip()
+    except Exception as e:
+        print(f"    Warning: Failed to parse MTL {mtl_path}: {e}")
+        
+    return props
+
 def texture_application(stage, root_prim_path, source_obj_path):
     """
-    Manually binds a texture to a prim when standard MTL referencing fails.
+    Manually binds a texture to a prim using Strict Asset Separation.
 
-    This function attempts to locate a `textured.png` file in the same directory as the source OBJ.
-    If found, it explicitly creates a UsdPreviewSurface material graph:
-    1.  **Sampler**: Creates a UsdUVTexture sampler referencing the image file.
-    2.  **Shader**: Creates a UsdPreviewSurface shader.
-    3.  **Connection**: Connects Sampler (RGB) -> Shader (DiffuseColor).
-    4.  **Binding**: Binds the material to the root prim of the asset.
-
-    Args:
-        stage (Usd.Stage): The active USD stage.
-        root_prim_path (str): The path to the root prim of the asset being converted.
-        source_obj_path (str): The absolute filesystem path to the source OBJ file.
+    1. Uses source_obj_path to find the local MTL file.
+    2. Parses MTL for properties (Ns, Ks, Kd, etc.) and Texture (map_Kd).
+    3. Applies these STRICTLY from the source folder (node cross-folder borrowing).
     """
-    # Locate the texture file on disk
     source_dir = os.path.dirname(source_obj_path)
-    # Common names for YCB textures. Add others if yours differ.
-    texture_file_name = "textured.png"
+    obj_name_stem = Path(source_obj_path).stem
     
-    texture_path = os.path.join(source_dir, texture_file_name)
-    if not os.path.exists(texture_path):
-        # Silent return if no texture manual override needed/found
+    # Check for OBJ-name-based MTL
+    mtl_candidates = [
+        os.path.join(source_dir, f"{obj_name_stem}.mtl"),
+        os.path.join(source_dir, "textured.mtl")
+    ]
+    
+    source_mtl_path = None
+    for c in mtl_candidates:
+        if os.path.exists(c):
+            source_mtl_path = c
+            break
+            
+    if not source_mtl_path:
+        # No MTL found, cannot determine texture strictly from MTL
         return
 
-    print(f"    [Hybrid] Found texture: {texture_path}. Applying explicit material.")
+    # 1. Parse ONLY the local MTL
+    props = parse_mtl(source_mtl_path)
+    
+    # 2. Locate Texture from map_Kd
+    texture_path = None
+    if props['map_Kd']:
+        # Try finding map_Kd relative to source dir
+        t_path = os.path.join(source_dir, props['map_Kd'])
+        if os.path.exists(t_path):
+            texture_path = t_path
+    
+    # Fallback to "textured.png" ONLY if MTL didn't specify one or it wasn't found
+    if not texture_path:
+        fallback = os.path.join(source_dir, "textured.png")
+        if os.path.exists(fallback):
+            texture_path = fallback
+
+    if not texture_path:
+        return
+
+    print(f"    [Hybrid] Applying Material (Strict). Source: {source_dir}. Texture: {os.path.basename(texture_path)}")
 
     # Create the Material Container
     mat_path = f"{root_prim_path}/Looks/VerifiedMaterial"
@@ -106,9 +175,34 @@ def texture_application(stage, root_prim_path, source_obj_path):
     shader = UsdShade.Shader.Define(stage, shader_path)
     shader.CreateIdAttr("UsdPreviewSurface")
     
-    # Create the inputs on the Surface Shader
+    # Diffuse Color
     diffuse_input = shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f)
-    diffuse_input.Set(Gf.Vec3f(1.0, 1.0, 1.0)) # Fallback white
+    diffuse_input.Set(Gf.Vec3f(*props['Kd']))
+
+    # Specular Color (Ks)
+    if props['Ks'] is not None:
+        spec_input = shader.CreateInput("specularColor", Sdf.ValueTypeNames.Color3f)
+        spec_input.Set(Gf.Vec3f(*props['Ks']))
+
+    # Roughness
+    if props['Ns'] is not None:
+        ns = props['Ns']
+        roughness = 0.5 
+        if ns > 0:
+            # Roughness = sqrt(2 / (Ns + 2))
+            roughness = (2.0 / (ns + 2.0)) ** 0.5
+        
+        roughness_input = shader.CreateInput("roughness", Sdf.ValueTypeNames.Float)
+        roughness_input.Set(roughness)
+
+    # Opacity (d)
+    opacity_input = shader.CreateInput("opacity", Sdf.ValueTypeNames.Float)
+    opacity_input.Set(props['d'])
+
+    # IOR (Ni)
+    if props['Ni'] is not None:
+        ior_input = shader.CreateInput("ior", Sdf.ValueTypeNames.Float)
+        ior_input.Set(props['Ni'])
 
     # Create the Texture Sampler (UsdUVTexture)
     sampler_path = f"{mat_path}/DiffuseSampler"
@@ -117,7 +211,7 @@ def texture_application(stage, root_prim_path, source_obj_path):
     sampler.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_path)
     sampler.CreateOutput("rgb", Sdf.ValueTypeNames.Float3)
 
-    # Create Primvar Reader (Essential for UV Mapping)
+    # Create Primvar Reader
     reader_path = f"{mat_path}/stReader"
     reader = UsdShade.Shader.Define(stage, reader_path)
     reader.CreateIdAttr("UsdPrimvarReader_float2")
@@ -194,8 +288,6 @@ def post_process_usd(stage_path, name, scale, semantic_label, source_path):
     rigid_prim.enable_rigid_body_physics()
 
     # Apply Collision
-    # Note: Collision might be tricky on the root Xform if meshes are children.
-    # RigidPrim handles mass on root. Collision might need to be on the mesh prims or convex hull on root.
     try:
         geometry_prim = GeometryPrim(prim_path=str(root_prim_path), collision=True)
         geometry_prim.set_collision_approximation("convexHull")
@@ -228,7 +320,7 @@ async def process_asset_chain(name, source_path, dest_folder, scale, semantic_la
     usd_safe_name = name.replace(" ", "_").replace(".", "_")
     output_path = os.path.join(dest_folder, f"{usd_safe_name}.usd")
     
-    # 1. Native Conversion
+    # Native Conversion
     abs_source = os.path.abspath(str(source_path))
     abs_dest = os.path.abspath(output_path)
     
@@ -282,17 +374,38 @@ async def run_conversion_async(config):
                 })
         elif group_type == "directory":
             src_path = group.get("path")
-            mesh_rel = group.get("mesh_relative_path", "")
+            mesh_rel_raw = group.get("mesh_relative_path", "")
+            
+            candidate_rels = []
+            if isinstance(mesh_rel_raw, list):
+                candidate_rels = mesh_rel_raw
+            else:
+                # Default hardcoded preference if not specified, or just use the single provided one
+                if not mesh_rel_raw:
+                     # If config doesn't specify, default to our YCB logic
+                     candidate_rels = ["google_512k/textured.obj", "tsdf/textured.obj"]
+                else:
+                    candidate_rels = [mesh_rel_raw]
+
             root = Path(src_path)
             if root.exists():
                 for folder in sorted([f for f in root.iterdir() if f.is_dir()]):
-                    mesh_file = folder / mesh_rel
-                    if mesh_file.exists():
+                    # Check candidates in order
+                    found_mesh = None
+                    for rel in candidate_rels:
+                        mesh_file = folder / rel
+                        if mesh_file.exists():
+                            found_mesh = mesh_file
+                            break
+                    
+                    if found_mesh:
                         targets.append({
                             "name": folder.name, 
-                            "path": str(mesh_file.absolute()), 
+                            "path": str(found_mesh.absolute()), 
                             "label": folder.name
                         })
+                    else:
+                         print(f"    Warning: No valid mesh found for {folder.name} in candidates: {candidate_rels}")
         elif group_type == "list":
              items = group.get("items", [])
              for item in items:

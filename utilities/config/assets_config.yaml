@@ -5,13 +5,17 @@
 destination_dir: "/home/ubuntu/Workspace/data/ycb" # Where to save the converted USDs
 
 assets:
-  # Group 1: Standard YCB Dataset (Glob Pattern)
+  # Group 1: YCB Dataset - Prioritized Source Scanning
   - name: "ycb_objects"
-    type: "glob"
-    # Search for files matching this pattern recursively
-    # The ** allows searching through any subdirectory structure
-    search_pattern: "/home/ubuntu/Workspace/data/ycb/**/tsdf/textured.obj"
-    # depth 2 means the object name is 2 folders up from the file
-    # e.g. .../073-f_lego_duplo/tsdf/textured.obj -> name is "073-f_lego_duplo"
-    name_depth: 2
+    type: "directory"
+    # Root path containing object folders (e.g. 003_cracker_box, 004_sugar_box)
+    path: "/home/ubuntu/Workspace/data/ycb"
+
+    # Priority List:
+    # 1. Try google_512k/textured.obj
+    # 2. Fallback to tsdf/textured.obj
+    mesh_relative_path:
+      - "google_512k/textured.obj"
+      - "tsdf/textured.obj"
+
     scale: 1.0
