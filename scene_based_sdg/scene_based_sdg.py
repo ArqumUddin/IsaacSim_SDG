@@ -89,6 +89,8 @@ class SceneBasedSDG:
         self.mesh_distractors = []
         self.shape_distractors = []
         
+        self.unique_labels = set() # Track for Writer categories
+        
         # Assets root path for resolution
         self.assets_root_path = get_assets_root_path()
 
@@ -172,9 +174,37 @@ class SceneBasedSDG:
             if not os.path.isabs(out_dir):
                 out_dir = os.path.join(os.getcwd(), out_dir)
                 writer_kwargs["output_dir"] = out_dir
+        
+            # Dynamic COCO Category Generation
+            if writer_type == "CocoWriter":
+                if "semantic_types" not in writer_kwargs:
+                    writer_kwargs["semantic_types"] = ["class"]
+                if "coco_categories" not in writer_kwargs:
+                    print("[SDG] Auto-generating coco_categories...")
+                    writer_kwargs["coco_categories"] = self._generate_coco_categories()
 
         writer.initialize(**writer_kwargs)
         return writer
+
+    def _generate_coco_categories(self):
+        """
+        Generates the 'coco_categories' dictionary for the CocoWriter.
+        """
+        categories = {}
+        ordered_labels = sorted(list(self.unique_labels))
+        print(f"[SDG] Found {len(ordered_labels)} unique labels: {ordered_labels}")
+
+        for i, label in enumerate(ordered_labels):
+            cat_id = i + 1
+            color = [random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)]
+            categories[label] = {
+                "name": label,
+                "id": cat_id,
+                "supercategory": "ycb",
+                "isthing": 1,
+                "color": color
+            }
+        return categories
 
     def setup_assets(self) -> None:
         """
@@ -249,6 +279,7 @@ class SceneBasedSDG:
                     scene_based_sdg_utils.add_colliders_and_rigid_body_dynamics(prim, disable_gravity=disable_gravity)
                     remove_labels(prim, include_descendants=True)
                     add_labels(prim, labels=[label], instance_name="class")
+                    self.unique_labels.add(label)
                     self.target_assets.append(prim)
                 except Exception as e:
                     print(f"[SDG] Failed to load asset {url}: {e}")

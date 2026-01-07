@@ -75,7 +75,7 @@ labeled_assets:
     files:
       - /Isaac/Props/YCB/Axis_Aligned/036_wood_block.usd
     # Regex pattern to replace in the asset name (e.g. "002_banana" -> "banana")
-    regex_replace_pattern: "^\\d+_"
+    regex_replace_pattern: "^[_0-9-]+"
     regex_replace_repl: ""
 
   # Manually labeled assets with specific labels and properties
