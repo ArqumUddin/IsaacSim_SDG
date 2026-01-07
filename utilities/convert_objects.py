@@ -144,10 +144,10 @@ def texture_application(stage, root_prim_path, source_obj_path):
         # No MTL found, cannot determine texture strictly from MTL
         return
 
-    # 1. Parse ONLY the local MTL
+    # Parse ONLY the local MTL
     props = parse_mtl(source_mtl_path)
     
-    # 2. Locate Texture from map_Kd
+    # Locate Texture from map_Kd
     texture_path = None
     if props['map_Kd']:
         # Try finding map_Kd relative to source dir
