@@ -1,45 +1,33 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 launch_config:
   renderer: RaytracedLighting
-  headless: false
+  headless: true
 env_url: ""
 working_area_size:
   - 4
   - 4
   - 3
 light_config:
-  count: 3
+  count: 4
   type: "Sphere"
   intensity_min_max: [30000, 40000]
   temperature_min_max: [6000, 7000]
   distant_light_intensity_min_max: [300, 600]
 rt_subframes: 4
-num_frames: 10
-num_cameras: 2
+num_frames: 50
+num_cameras: 4
 disable_render_products_between_captures: false
 camera_collider_radius: 0.2
 simulation_duration_between_captures: 0.0
 resolution:
-  - 640
-  - 480
+  - 720
+  - 720
 camera_look_at_target_offset: 0.15
 camera_distance_to_target_min_max:
-  - 0.25
   - 0.75
+  - 1.5
 writer_type: "CocoWriter"
 writer_kwargs:
   output_dir: "_out_coco_data"
@@ -47,6 +35,7 @@ writer_kwargs:
   semantic_segmentation: true
   use_common_output_dir: true
   bounding_box_2d_tight: true
+  semantic_types: ["class"]
 
 labeled_assets:
   # Labeled assets (scanned from folders with auto-labeling)
@@ -56,19 +45,11 @@ labeled_assets:
     folders:
       - "/home/ubuntu/Workspace/data/ycb/ycb_objects"
     files: []
-    regex_replace_pattern: "^\\d+[-_]*"
+    regex_replace_pattern: "^[_0-9-]+"
     regex_replace_repl: ""
     scale_min_max: [0.75, 1.25]
-    randomize_color: true
+    randomize_color: false
     floating: true
-
-  # Manually labeled assets
-  manual_label: []
-  # - url: /Isaac/Props/YCB/Axis_Aligned/008_pudding_box.usd
-  #   label: pudding_box
-  #   num: 5
-  #   gravity_disabled_chance: 1.0
-  #   scale_min_max: [0.75, 1.25]
 
 shape_distractors_types:
   - capsule
@@ -79,14 +60,13 @@ shape_distractors_types:
 shape_distractors_scale_min_max:
   - 0.015
   - 0.15
-shape_distractors_num: 350
+shape_distractors_num: 150
 mesh_distractors_urls:
   - /Isaac/Environments/Simple_Warehouse/Props/SM_CardBoxD_04_1847.usd
   - /Isaac/Environments/Simple_Warehouse/Props/SM_CardBoxA_01_414.usd
   - /Isaac/Environments/Simple_Warehouse/Props/S_TrafficCone.usd
   - /Isaac/Environments/Simple_Warehouse/Props/S_WetFloorSign.usd
   - /Isaac/Environments/Simple_Warehouse/Props/SM_BarelPlastic_B_03.usd
-  - /Isaac/Environments/Office/Props/SM_Board.usd
   - /Isaac/Environments/Office/Props/SM_Book_03.usd
   - /Isaac/Environments/Office/Props/SM_Book_34.usd
   - /Isaac/Environments/Office/Props/SM_BookOpen_01.usd

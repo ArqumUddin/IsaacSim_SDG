@@ -92,6 +92,7 @@ class ObjectBasedSDG:
         self.falling_mesh_distractors = []
         
         self.physx_sub = None
+        self.unique_labels = set() # Track for Writer categories
 
         # Config extraction
         self.working_area_size = self.config.get("working_area_size", (3, 3, 3))
@@ -252,6 +253,7 @@ class ObjectBasedSDG:
                 object_based_sdg_utils.add_colliders(prim)
                 object_based_sdg_utils.add_rigid_body_dynamics(prim, disable_gravity=floating)
                 add_labels(prim, labels=[label], instance_name="class")
+                self.unique_labels.add(label)
 
                 if floating:
                     self.floating_labeled_prims.append(prim)
@@ -387,9 +389,59 @@ class ObjectBasedSDG:
 
         print(f"[SDG] Initializing {writer_type} Writer")
         if self.render_products:
+            # Dynamic COCO Category Generation
+            if writer_type == "CocoWriter":
+                # Ensure semantic_types is present (fixes 'other' class issue)
+                if "semantic_types" not in writer_kwargs:
+                    writer_kwargs["semantic_types"] = ["class"]
+                
+                # Ensure coco_categories is present (fixes missing IDs)
+                if "coco_categories" not in writer_kwargs:
+                    print("[SDG] Auto-generating coco_categories...")
+                    writer_kwargs["coco_categories"] = self._generate_coco_categories()
+
             self.writer = rep.writers.get(writer_type)
             self.writer.initialize(**writer_kwargs)
             self.writer.attach(self.render_products)
+
+    def _generate_coco_categories(self):
+        """
+        Generates the 'coco_categories' dictionary for the CocoWriter.
+        
+        This matches the Labels found in the scene to unique IDs and Colors,
+        satisfying the CocoWriter's requirement for specific category definitions.
+        
+        Returns:
+            list[dict]: A List of category dictionaries (standard for some Writers) 
+                        OR a Dict of Dicts depending on the specific Writer version. 
+                        We conform to the Dict structure:
+                        {
+                           "name_key": { "id": int, "name": str, ... }
+                        }
+        """
+        categories = {}
+        # Use the set we populated during spawning (Robuster than querying USD attributes)
+        ordered_labels = sorted(list(self.unique_labels))
+        
+        print(f"[SDG] Found {len(ordered_labels)} unique labels: {ordered_labels}")
+
+        for i, label in enumerate(ordered_labels):
+            # ID 0 is usually reserved for background
+            cat_id = i + 1
+            
+            # Generate a consistent color hash or random
+            # Just using random for now effectively, but seeding could make it deterministic
+            color = [random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)]
+            
+            categories[label] = {
+                "name": label,
+                "id": cat_id,
+                "supercategory": "ycb",
+                "isthing": 1,
+                "color": color
+            }
+            
+        return categories
 
     def setup_randomizers(self):
         """
