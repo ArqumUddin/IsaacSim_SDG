@@ -258,33 +258,32 @@ class SceneBasedSDG:
 
     def spawn_assets(self) -> None:
         """
-        Spawns a random subset of assets from self.asset_library and distractors.
+        Spawns a random subset of assets from self.asset_library.
         Clears existing assets first to ensure a fresh set.
+
+        Note: Distractors are loaded once at initialization and reused across environments.
 
         This is called every time a new environment is loaded.
         """
         stage = omni.usd.get_context().get_stage()
-        
-        # Clear existing
+
+        # Clear existing labeled assets only (distractors are loaded once and reused)
         if stage.GetPrimAtPath("/Assets"):
             omni.kit.commands.execute("DeletePrims", paths=["/Assets"])
-        if stage.GetPrimAtPath("/Distractors"):
-            omni.kit.commands.execute("DeletePrims", paths=["/Distractors"])
-            
+
         labeled_cfg = self.config.get("labeled_assets", {})
-        distractors_cfg = self.config.get("distractors", {})
         auto_cfg = labeled_cfg.get("auto_label", {}) # For max types config
-        
+
         # Sample Assets
         assets_to_spawn = self.asset_library.copy()
-        
+
         max_types = auto_cfg.get("max_asset_types_to_load")
         if max_types and len(assets_to_spawn) > max_types:
             print(f"[SDG] Sub-sampling assets: selecting {max_types} from {len(assets_to_spawn)} available.")
             assets_to_spawn = random.sample(assets_to_spawn, max_types)
-            
+
         self.target_assets = []
-        
+
         # Spawn Loop
         print(f"[SDG] Spawning {len(assets_to_spawn)} unique labeled asset types...")
         for asset_def in assets_to_spawn:
@@ -293,11 +292,11 @@ class SceneBasedSDG:
             count = asset_def.get("count", 1)
             grav_chance = asset_def.get("gravity_disabled_chance", 0.0)
             scale_range = asset_def.get("scale_min_max", [1.0, 1.0])
-            
+
             # Resolve URL if relative
             if not os.path.isabs(url) and "://" not in url:
                 if not url.startswith("/"): # Check path relative to assets root
-                     url = self.assets_root_path + url 
+                     url = self.assets_root_path + url
 
             for _ in range(count):
                 disable_gravity = random.random() < grav_chance
@@ -305,7 +304,7 @@ class SceneBasedSDG:
                 prim_path = omni.usd.get_stage_next_free_path(stage, f"/Assets/{name_prefix}{label}", False)
                 try:
                     prim = add_reference_to_stage(usd_path=url, prim_path=prim_path)
-                    
+
                     # Apply Random Scale
                     scale = random.uniform(scale_range[0], scale_range[1])
                     scene_based_sdg_utils.set_transform_attributes(prim, scale=(scale, scale, scale))
@@ -319,6 +318,19 @@ class SceneBasedSDG:
 
         print(f"[SDG] Total labeled assets spawned: {len(self.target_assets)}")
 
+        # Scale fix
+        scene_based_sdg_utils.resolve_scale_issues_with_metrics_assembler()
+
+    def setup_distractors(self) -> None:
+        """
+        Loads distractors once at initialization.
+
+        This method is called once during setup. Distractors are then reused
+        across all environment iterations by repositioning them rather than
+        reloading from USD files.
+        """
+        distractors_cfg = self.config.get("distractors", {})
+
         # Shape Distractors
         s_float, s_fall = scene_based_sdg_utils.load_shape_distractors(distractors_cfg.get("shape_distractors", {}))
         self.shape_distractors = s_float + s_fall
@@ -328,9 +340,6 @@ class SceneBasedSDG:
         m_float, m_fall = scene_based_sdg_utils.load_mesh_distractors(distractors_cfg.get("mesh_distractors", {}))
         self.mesh_distractors = m_float + m_fall
         print(f"[SDG] Loaded {len(self.mesh_distractors)} mesh distractors")
-        
-        # Scale fix
-        scene_based_sdg_utils.resolve_scale_issues_with_metrics_assembler()
 
     def setup_scene_lights(self) -> None:
         """
@@ -408,30 +417,29 @@ class SceneBasedSDG:
         print(f"[SDG] Creating new stage")
         omni.usd.get_context().new_stage()
         rep.orchestrator.set_capture_on_play(False)
-        
+
         self.setup_cameras()
         self.scan_content_library() # Scan once to get all labels
-        self.setup_writers()
+        self.setup_distractors() # Load distractors once (reused across environments)
+        self.setup_randomizers() # Register randomizers once (reused across environments)
         self.setup_scene_lights()
+        self.setup_writers()
 
         env_cycle = cycle(env_urls)
         capture_counter = 0
-        
+
         while capture_counter < total_captures:
             env_url = next(env_cycle)
             print(f"[SDG] Loading environment: {env_url}")
-            
+
             # Load/Replace environment at /Environment
             scene_based_sdg_utils.load_env(env_url, prim_path="/Environment")
             print(f"[SDG] Setting up environment")
             scene_based_sdg_utils.setup_env(root_path="/Environment", hide_top_walls=self.debug_mode)
             self.app.update()
-            
+
             # Spawn New Assets for this cycle
             self.spawn_assets()
-            
-            # Register Randomizers for new assets
-            self.setup_randomizers()
 
             # Find working area
             working_area_loc = scene_based_sdg_utils.get_matching_prim_location(

@@ -61,7 +61,7 @@ labeled_assets:
   # Labeled assets (scanned from folders with auto-labeling)
   auto_label:
     # Number of labeled assets to create from the given files/folders list
-    num: 2
+    num: 1
     # Chance to disable gravity for the labeled assets (0.0 - all the assets will fall, 1.0 - all the assets will float)
     gravity_disabled_chance: 0.0
     # List of folders and files to search for the labeled assets
@@ -72,13 +72,13 @@ labeled_assets:
     regex_replace_pattern: "^[_0-9-]+"
     regex_replace_repl: ""
     scale_min_max: [0.85, 1.15]
-    max_asset_types_to_load: 18
+    max_asset_types_to_load: 25
 
 distractors:
   # Shape distractors (unlabeled background assets) to drop in the scene (e.g. capsules, cones, cylinders)
   shape_distractors:
     # Amount of shape distractors to create
-    num: 2
+    num: 10
     # Chance to disable gravity for the shape distractors
     gravity_disabled_chance: 0.0
     # List of shape types to randomly choose from
@@ -87,18 +87,11 @@ distractors:
   # Mesh distractors (unlabeled background assets) to drop in the scene
   mesh_distractors:
     # Amount of mesh distractors to create
-    num: 0
+    num: 7
     # Chance to disable gravity for the mesh distractors
     gravity_disabled_chance: 0.0
     # List of folders and files to search to randomly choose from
-    folders:
-      - /NVIDIA/Assets/DigitalTwin/Assets/Warehouse/Safety/Floor_Signs/
-      - /NVIDIA/Assets/DigitalTwin/Assets/Warehouse/Safety/Cones/
     files:
-      - /Isaac/Environments/Simple_Warehouse/Props/SM_CardBoxD_04_1847.usd
-      - /Isaac/Environments/Simple_Warehouse/Props/SM_CardBoxA_01_414.usd
-      - /Isaac/Environments/Simple_Warehouse/Props/S_TrafficCone.usd
-      - /Isaac/Environments/Simple_Warehouse/Props/S_WetFloorSign.usd
       - /Isaac/Environments/Office/Props/SM_Book_03.usd
       - /Isaac/Environments/Office/Props/SM_Book_34.usd
       - /Isaac/Environments/Office/Props/SM_BookOpen_01.usd
