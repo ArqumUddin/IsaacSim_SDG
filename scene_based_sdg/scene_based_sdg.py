@@ -35,7 +35,7 @@ with open(config_file, "r") as f:
         exit(1)
 
 # Launch App
-simulation_app = SimulationApp(launch_config={"headless": config.get("launch_config", {}).get("headless", False)})
+simulation_app = SimulationApp(launch_config={"headless": config.get("launch_config", {}).get("headless", True)})
 
 # Imports after launch
 import carb.settings
@@ -227,7 +227,7 @@ class SceneBasedSDG:
         labeled_cfg = self.config.get("labeled_assets", {})
         distractors_cfg = self.config.get("distractors", {})
         
-        # --- 1. Labeled Assets ---
+        # Labeled Assets
         self.target_assets = []
         # Prepare list of asset definitions to spawn
         assets_to_spawn = []
@@ -244,10 +244,12 @@ class SceneBasedSDG:
             count = auto_cfg.get("num", 1)
             gravity_chance = auto_cfg.get("gravity_disabled_chance", 0.0)
             if auto_cfg.get("floating", False): gravity_chance = 1.0 # Override
+            scale_min_max = auto_cfg.get("scale_min_max", [1.0, 1.0])
             
             for asset in scanned:
                 asset["count"] = count
                 asset["gravity_disabled_chance"] = gravity_chance
+                asset["scale_min_max"] = scale_min_max
                 assets_to_spawn.append(asset)
         
         # Manual Label
@@ -264,6 +266,7 @@ class SceneBasedSDG:
             label = asset_def.get("label")
             count = asset_def.get("count", 1)
             grav_chance = asset_def.get("gravity_disabled_chance", 0.0)
+            scale_range = asset_def.get("scale_min_max", [1.0, 1.0])
             
             # Resolve URL if relative
             if not os.path.isabs(url) and "://" not in url:
@@ -276,6 +279,11 @@ class SceneBasedSDG:
                 prim_path = omni.usd.get_stage_next_free_path(stage, f"/Assets/{name_prefix}{label}", False)
                 try:
                     prim = add_reference_to_stage(usd_path=url, prim_path=prim_path)
+                    
+                    # Apply Random Scale
+                    scale = random.uniform(scale_range[0], scale_range[1])
+                    scene_based_sdg_utils.set_transform_attributes(prim, scale=(scale, scale, scale))
+
                     scene_based_sdg_utils.add_colliders_and_rigid_body_dynamics(prim, disable_gravity=disable_gravity)
                     remove_labels(prim, include_descendants=True)
                     add_labels(prim, labels=[label], instance_name="class")
@@ -323,7 +331,8 @@ class SceneBasedSDG:
         """
         print(f"[SDG] Registering randomizers")
         scene_based_sdg_utils.register_dome_light_randomizer()
-        scene_based_sdg_utils.register_shape_distractors_color_randomizer(self.shape_distractors)
+        if self.shape_distractors:
+            scene_based_sdg_utils.register_shape_distractors_color_randomizer(self.shape_distractors)
 
     def run(self) -> None:
         """
@@ -366,16 +375,10 @@ class SceneBasedSDG:
         omni.usd.get_context().new_stage()
         rep.orchestrator.set_capture_on_play(False)
         
-        # Setup static elements
         self.setup_cameras()
-        self.setup_render_products()
+        self.setup_assets()
         self.setup_writers()
         self.setup_scene_lights()
-        # Assets are loaded once but reused/randomized per env? 
-        # Actually asset loading creates Prims. If we load new envs, we might need to preserve these 
-        # or recreate them if we clear stage. Omni usually keeps stage open.
-        # The original code loaded assets *after* new_stage.
-        self.setup_assets()
         self.setup_randomizers()
 
         env_cycle = cycle(env_urls)
@@ -415,14 +418,14 @@ class SceneBasedSDG:
             scene_based_sdg_utils.randomize_lights(self.scene_lights, lights_range, (0.1, 0.9)*3, (500, 2500))
 
             rep.utils.send_og_event(event_name="randomize_dome_lights")
-            rep.utils.send_og_event(event_name="randomize_shape_distractor_colors")
+            if self.shape_distractors:
+                rep.utils.send_og_event(event_name="randomize_shape_distractor_colors")
 
             # Physics Settle
             print(f"\tSimulating physics...")
             self.app.update()
             scene_based_sdg_utils.run_simulation(num_frames=4, render=True)
 
-            # --- Capture Loop (Floating) ---
             if disable_rp: self._toggle_updates(True)
             if use_path_tracing: self._set_renderer("PathTracing")
 
@@ -443,11 +446,9 @@ class SceneBasedSDG:
             if disable_rp: self._toggle_updates(False)
             if use_path_tracing: self._set_renderer("RayTracedLighting")
 
-            # --- Simulate Drop ---
             print(f"\tRunning drop simulation...")
             scene_based_sdg_utils.run_simulation(num_frames=200, render=False)
 
-            # --- Capture Loop (Dropped) ---
             if disable_rp: self._toggle_updates(True)
             if use_path_tracing: self._set_renderer("PathTracing")
 

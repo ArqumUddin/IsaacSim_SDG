@@ -30,7 +30,7 @@ camera_distance_to_target_min_max:
   - 1.5
 writer_type: "CocoWriter"
 writer_kwargs:
-  output_dir: "_out_coco_data"
+  output_dir: "/home/ubuntu/Workspace/data/object_based_sdg_data"
   rgb: true
   semantic_segmentation: true
   use_common_output_dir: true

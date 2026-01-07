@@ -50,7 +50,6 @@ def set_transform_attributes(
         rotation (Gf.Vec3f, optional): Euler rotation (XYZ) in degrees.
         scale (Gf.Vec3f, optional): Scale vector.
     """
-
     if location is not None:
         if not prim.HasAttribute("xformOp:translate"):
             UsdGeom.Xformable(prim).AddTranslateOp()
@@ -302,7 +301,7 @@ def get_usd_paths(
     for file_path in files:
         file_path = (
             file_path
-            if file_path.startswith(("omniverse://", "http://", "https://", "file://"))
+            if file_path.startswith(("omniverse://", "http://", "https://", "file://")) or os.path.exists(file_path)
             else assets_root_path + file_path
         )
         env_paths.append(file_path)
@@ -310,7 +309,7 @@ def get_usd_paths(
     for folder_path in folders:
         folder_path = (
             folder_path
-            if folder_path.startswith(("omniverse://", "http://", "https://", "file://"))
+            if folder_path.startswith(("omniverse://", "http://", "https://", "file://")) or os.path.exists(folder_path)
             else assets_root_path + folder_path
         )
         env_paths.extend(get_usd_paths_from_folder(folder_path, recursive=True, skip_keywords=skip_folder_keywords))
