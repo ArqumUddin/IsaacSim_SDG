@@ -174,9 +174,21 @@ def get_random_pose_on_sphere(
     location = Gf.Vec3d(origin[0] + x, origin[1] + y, origin[2] + z)
     # Calculate direction vector from camera to look_at point
     direction = Gf.Vec3d(origin) - location
-    direction_normalized = direction.GetNormalized()
-    # Calculate rotation from forward direction (rotateFrom) to direction vector (rotateTo)
-    rotation = Gf.Rotation(Gf.Vec3d(camera_forward_axis), direction_normalized)
+    
+    if keep_level:
+        # Use LookAt to ensure Up vector is preserved (Level Horizon)
+        # SetLookAt creates World->Camera (View Matrix) looking down -Z with +Y Up (by default) or specified Up
+        # We want Camera -> World
+        view_mat = Gf.Matrix4d()
+        view_mat.SetLookAt(location, origin, Gf.Vec3d(0, 0, 1))
+        model_mat = view_mat.GetInverse()
+        rotation = model_mat.ExtractRotation()
+    else:
+        direction_normalized = direction.GetNormalized()
+        # Calculate rotation from forward direction (rotateFrom) to direction vector (rotateTo)
+        # This shortest-arc rotation does not constrain the up-vector, allowing 'roll'
+        rotation = Gf.Rotation(Gf.Vec3d(camera_forward_axis), direction_normalized)
+        
     orientation = Gf.Quatf(rotation.GetQuat())
 
     return location, orientation

@@ -93,6 +93,56 @@ class SceneBasedSDG:
         
         # Assets root path for resolution
         self.assets_root_path = get_assets_root_path()
+        
+        # Asset Library (All discovered assets)
+        self.asset_library = []
+
+    def scan_content_library(self) -> None:
+        """
+        Scans configured folders for assets and populates self.asset_library.
+        Also populates self.unique_labels so writers can be initialized with all possible classes.
+
+        This is called once at the start of the pipeline to get all labels.
+        """
+        labeled_cfg = self.config.get("labeled_assets", {})
+        auto_cfg = labeled_cfg.get("auto_label", {})
+        
+        self.asset_library = []
+        
+        # Auto-Label (Scanned)
+        if auto_cfg:
+            scanned = scene_based_sdg_utils.scan_assets(
+                folders=auto_cfg.get("folders", []),
+                files=auto_cfg.get("files", []),
+                regex_replace_pattern=auto_cfg.get("regex_replace_pattern", ""),
+                regex_replace_repl=auto_cfg.get("regex_replace_repl", "")
+            )
+            count = auto_cfg.get("num", 1)
+            gravity_chance = auto_cfg.get("gravity_disabled_chance", 0.0)
+            if auto_cfg.get("floating", False): gravity_chance = 1.0 # Override
+            scale_min_max = auto_cfg.get("scale_min_max", [1.0, 1.0])
+            
+            for asset in scanned:
+                asset["count"] = count
+                asset["gravity_disabled_chance"] = gravity_chance
+                asset["scale_min_max"] = scale_min_max
+                self.asset_library.append(asset)
+                # Track label
+                if "label" in asset:
+                    self.unique_labels.add(asset["label"])
+        
+        # Manual Label
+        manual_assets = labeled_cfg.get("manual_label", [])
+        for item in manual_assets:
+            # Normalize keys
+            curr_item = item.copy()
+            curr_item["count"] = item.get("num", item.get("count", 1))
+            self.asset_library.append(curr_item)
+            if "label" in curr_item:
+                self.unique_labels.add(curr_item["label"])
+
+        print(f"[SDG] Scanned {len(self.asset_library)} total asset definitions.")
+        print(f"[SDG] Found {len(self.unique_labels)} unique labels.")
 
     def setup_cameras(self) -> None:
         """
@@ -206,59 +256,35 @@ class SceneBasedSDG:
             }
         return categories
 
-    def setup_assets(self) -> None:
+    def spawn_assets(self) -> None:
         """
-        Loads labeled assets and distractors.
-        
-        Scanning:
-            - Uses `scene_based_sdg_utils.scan_assets` to find assets based on folder/file config.
-            - Supports regex-based auto-labeling.
-            
-        Spawning:
-            - Iterates through the list of found/configured assets.
-            - Spawns them into the USD stage under `/Assets` or `/Distractors`.
-            - Applies collision, rigid body dynamics, and semantic labels.
-            - Handles randomization of floating vs falling state based on `gravity_disabled_chance`.
-            
-        Scale:
-            - Calls Metrics Assembler to resolve any scale mismatches.
+        Spawns a random subset of assets from self.asset_library and distractors.
+        Clears existing assets first to ensure a fresh set.
+
+        This is called every time a new environment is loaded.
         """
         stage = omni.usd.get_context().get_stage()
+        
+        # Clear existing
+        if stage.GetPrimAtPath("/Assets"):
+            omni.kit.commands.execute("DeletePrims", paths=["/Assets"])
+        if stage.GetPrimAtPath("/Distractors"):
+            omni.kit.commands.execute("DeletePrims", paths=["/Distractors"])
+            
         labeled_cfg = self.config.get("labeled_assets", {})
         distractors_cfg = self.config.get("distractors", {})
+        auto_cfg = labeled_cfg.get("auto_label", {}) # For max types config
         
-        # Labeled Assets
-        self.target_assets = []
-        # Prepare list of asset definitions to spawn
-        assets_to_spawn = []
-
-        # Auto-Label (Scanned)
-        auto_cfg = labeled_cfg.get("auto_label", {})
-        if auto_cfg:
-            scanned = scene_based_sdg_utils.scan_assets(
-                folders=auto_cfg.get("folders", []),
-                files=auto_cfg.get("files", []),
-                regex_replace_pattern=auto_cfg.get("regex_replace_pattern", ""),
-                regex_replace_repl=auto_cfg.get("regex_replace_repl", "")
-            )
-            count = auto_cfg.get("num", 1)
-            gravity_chance = auto_cfg.get("gravity_disabled_chance", 0.0)
-            if auto_cfg.get("floating", False): gravity_chance = 1.0 # Override
-            scale_min_max = auto_cfg.get("scale_min_max", [1.0, 1.0])
+        # Sample Assets
+        assets_to_spawn = self.asset_library.copy()
+        
+        max_types = auto_cfg.get("max_asset_types_to_load")
+        if max_types and len(assets_to_spawn) > max_types:
+            print(f"[SDG] Sub-sampling assets: selecting {max_types} from {len(assets_to_spawn)} available.")
+            assets_to_spawn = random.sample(assets_to_spawn, max_types)
             
-            for asset in scanned:
-                asset["count"] = count
-                asset["gravity_disabled_chance"] = gravity_chance
-                asset["scale_min_max"] = scale_min_max
-                assets_to_spawn.append(asset)
+        self.target_assets = []
         
-        # Manual Label
-        manual_assets = labeled_cfg.get("manual_label", [])
-        for item in manual_assets:
-            # Normalize keys to match scanned format (url, label, num->count)
-            item["count"] = item.get("num", item.get("count", 1))
-            assets_to_spawn.append(item)
-
         # Spawn Loop
         print(f"[SDG] Spawning {len(assets_to_spawn)} unique labeled asset types...")
         for asset_def in assets_to_spawn:
@@ -271,7 +297,7 @@ class SceneBasedSDG:
             # Resolve URL if relative
             if not os.path.isabs(url) and "://" not in url:
                 if not url.startswith("/"): # Check path relative to assets root
-                     url = self.assets_root_path + url  # logic might vary, usually starts with /Isaac
+                     url = self.assets_root_path + url 
 
             for _ in range(count):
                 disable_gravity = random.random() < grav_chance
@@ -287,7 +313,6 @@ class SceneBasedSDG:
                     scene_based_sdg_utils.add_colliders_and_rigid_body_dynamics(prim, disable_gravity=disable_gravity)
                     remove_labels(prim, include_descendants=True)
                     add_labels(prim, labels=[label], instance_name="class")
-                    self.unique_labels.add(label)
                     self.target_assets.append(prim)
                 except Exception as e:
                     print(f"[SDG] Failed to load asset {url}: {e}")
@@ -370,16 +395,24 @@ class SceneBasedSDG:
         disable_rp = capture_cfg.get("disable_render_products", False)
         dist_range = capture_cfg.get("camera_distance_to_target_range", (0.5, 1.5))
 
+        
+        keep_level = capture_cfg.get("keep_camera_level", False)
+        floating_angles = capture_cfg.get("floating_per_camera_angles", {})
+        dropped_angles = capture_cfg.get("dropped_per_camera_angles", {})
+        
+        # Convert integer keys from string (YAML dict keys are sometimes strings if not careful, safe to cast)
+        floating_angles = {int(k): v for k, v in floating_angles.items()}
+        dropped_angles = {int(k): v for k, v in dropped_angles.items()}
+
         # Setup Stage
         print(f"[SDG] Creating new stage")
         omni.usd.get_context().new_stage()
         rep.orchestrator.set_capture_on_play(False)
         
         self.setup_cameras()
-        self.setup_assets()
+        self.scan_content_library() # Scan once to get all labels
         self.setup_writers()
         self.setup_scene_lights()
-        self.setup_randomizers()
 
         env_cycle = cycle(env_urls)
         capture_counter = 0
@@ -393,6 +426,12 @@ class SceneBasedSDG:
             print(f"[SDG] Setting up environment")
             scene_based_sdg_utils.setup_env(root_path="/Environment", hide_top_walls=self.debug_mode)
             self.app.update()
+            
+            # Spawn New Assets for this cycle
+            self.spawn_assets()
+            
+            # Register Randomizers for new assets
+            self.setup_randomizers()
 
             # Find working area
             working_area_loc = scene_based_sdg_utils.get_matching_prim_location(
@@ -433,10 +472,10 @@ class SceneBasedSDG:
                 if capture_counter >= total_captures: break
                 
                 # Randomize Cameras
-                per_cam = {0: (0, 75), 1: (80, 100)}
+                keep_level_list = list(range(len(self.cameras))) if keep_level else []
                 scene_based_sdg_utils.randomize_camera_poses(
                     self.cameras, self.target_assets, dist_range, (0, 75), 
-                    per_camera_polar_angles=per_cam, keep_level_cameras=[0, 1]
+                    per_camera_polar_angles=floating_angles, keep_level_cameras=keep_level_list
                 )
                 
                 print(f"\tCapturing floating {i+1}/{num_floating} (Total: {capture_counter+1})")
@@ -456,12 +495,12 @@ class SceneBasedSDG:
                 if capture_counter >= total_captures: break
                 
                 # Randomize Cameras (Top-Down preference)
-                per_cam = {0: (0, 25), 1: (25, 50), 2: (75, 100), 3: (75, 100)}
+                keep_level_list = list(range(len(self.cameras))) if keep_level else []
                 scene_based_sdg_utils.randomize_camera_poses(
                     self.cameras, self.target_assets, dist_range, (0, 45),
-                    per_camera_polar_angles=per_cam, keep_level_cameras=[0, 1, 2, 3]
+                    per_camera_polar_angles=dropped_angles, keep_level_cameras=keep_level_list
                 )
-                
+
                 print(f"\tCapturing dropped {i+1}/{num_dropped} (Total: {capture_counter+1})")
                 rep.orchestrator.step(rt_subframes=rt_subframes, delta_time=0.0)
                 capture_counter += 1

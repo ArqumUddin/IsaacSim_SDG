@@ -12,7 +12,7 @@ environments:
 
 capture:
   # Number of captures (frames = total_captures * num_cameras)
-  total_captures: 80
+  total_captures: 24
   # Number of captures per environment before running the simulation (objects in the air)
   num_floating_captures_per_env: 0
   # Number of captures per environment after running the simulation (objects dropped)
@@ -33,6 +33,18 @@ capture:
   camera_distance_to_target_range: [2.5, 3.5]
   # Number of scene lights to create in the working area
   num_scene_lights: 4
+  # Force cameras to stay level (Up vector = Z)
+  keep_camera_level: true
+  # Specific polar angle ranges for each camera index during 'floating' capture
+  floating_per_camera_angles:
+    0: [0, 75]
+    1: [80, 100]
+  # Specific polar angle ranges for each camera index during 'dropped' capture
+  dropped_per_camera_angles:
+    0: [0, 25]
+    1: [25, 50]
+    2: [75, 100]
+    3: [85, 95]
 
 writers:
   # Type of the writer to use (e.g. PoseWriter, BasicWriter, etc.) and the kwargs to pass to the writer init
@@ -59,13 +71,14 @@ labeled_assets:
     # Regex pattern to replace in the asset name
     regex_replace_pattern: "^[_0-9-]+"
     regex_replace_repl: ""
-    scale_min_max: [0.75, 1.25]
+    scale_min_max: [0.85, 1.15]
+    max_asset_types_to_load: 18
 
 distractors:
   # Shape distractors (unlabeled background assets) to drop in the scene (e.g. capsules, cones, cylinders)
   shape_distractors:
     # Amount of shape distractors to create
-    num: 0
+    num: 2
     # Chance to disable gravity for the shape distractors
     gravity_disabled_chance: 0.0
     # List of shape types to randomly choose from
