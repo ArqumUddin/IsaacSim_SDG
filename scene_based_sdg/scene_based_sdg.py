@@ -408,7 +408,14 @@ class SceneBasedSDG:
         keep_level = capture_cfg.get("keep_camera_level", False)
         floating_angles = capture_cfg.get("floating_per_camera_angles", {})
         dropped_angles = capture_cfg.get("dropped_per_camera_angles", {})
-        
+
+        # Raycast collision detection parameters for camera placement
+        enable_collision_check = capture_cfg.get("enable_camera_collision_check", True)
+        max_camera_retries = capture_cfg.get("max_camera_retries", 50)
+        blocking_substrings = capture_cfg.get("camera_blocking_path_substrings", ["wall", "exterior", "ceiling", "skirtingboard", "floor"])
+        debug_raycast = capture_cfg.get("debug_camera_raycast", False)
+        camera_height_offset = capture_cfg.get("camera_height_offset", 0.2)
+
         # Convert integer keys from string (YAML dict keys are sometimes strings if not careful, safe to cast)
         floating_angles = {int(k): v for k, v in floating_angles.items()}
         dropped_angles = {int(k): v for k, v in dropped_angles.items()}
@@ -437,6 +444,14 @@ class SceneBasedSDG:
             print(f"[SDG] Setting up environment")
             scene_based_sdg_utils.setup_env(root_path="/Environment", hide_top_walls=self.debug_mode)
             self.app.update()
+
+            # Calculate camera height constraints based on floor and ceiling
+            min_camera_height = scene_based_sdg_utils.get_surface_height(
+                "floor", camera_height_offset, add_offset=True, root_path="/Environment", default_value=camera_height_offset
+            )
+            max_camera_height = scene_based_sdg_utils.get_surface_height(
+                "ceiling", camera_height_offset, add_offset=False, root_path="/Environment", default_value=None
+            )
 
             # Spawn New Assets for this cycle
             self.spawn_assets()
@@ -478,12 +493,15 @@ class SceneBasedSDG:
 
             for i in range(num_floating):
                 if capture_counter >= total_captures: break
-                
+
                 # Randomize Cameras
                 keep_level_list = list(range(len(self.cameras))) if keep_level else []
                 scene_based_sdg_utils.randomize_camera_poses(
-                    self.cameras, self.target_assets, dist_range, (0, 75), 
-                    per_camera_polar_angles=floating_angles, keep_level_cameras=keep_level_list
+                    self.cameras, self.target_assets, dist_range, (0, 75),
+                    per_camera_polar_angles=floating_angles, keep_level_cameras=keep_level_list,
+                    enable_collision_check=enable_collision_check, max_retries=max_camera_retries,
+                    blocking_path_substrings=blocking_substrings, debug_raycast=debug_raycast,
+                    min_camera_height=min_camera_height, max_camera_height=max_camera_height
                 )
                 
                 print(f"\tCapturing floating {i+1}/{num_floating} (Total: {capture_counter+1})")
@@ -501,12 +519,15 @@ class SceneBasedSDG:
 
             for i in range(num_dropped):
                 if capture_counter >= total_captures: break
-                
+
                 # Randomize Cameras (Top-Down preference)
                 keep_level_list = list(range(len(self.cameras))) if keep_level else []
                 scene_based_sdg_utils.randomize_camera_poses(
                     self.cameras, self.target_assets, dist_range, (0, 45),
-                    per_camera_polar_angles=dropped_angles, keep_level_cameras=keep_level_list
+                    per_camera_polar_angles=dropped_angles, keep_level_cameras=keep_level_list,
+                    enable_collision_check=enable_collision_check, max_retries=max_camera_retries,
+                    blocking_path_substrings=blocking_substrings, debug_raycast=debug_raycast,
+                    min_camera_height=min_camera_height, max_camera_height=max_camera_height
                 )
 
                 print(f"\tCapturing dropped {i+1}/{num_dropped} (Total: {capture_counter+1})")

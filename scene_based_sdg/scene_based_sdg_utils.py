@@ -29,6 +29,7 @@ from isaacsim.core.utils.semantics import add_labels, remove_labels
 from isaacsim.core.utils.stage import add_reference_to_stage
 from isaacsim.storage.native import get_assets_root_path
 from pxr import Gf, PhysxSchema, Usd, UsdGeom, UsdPhysics
+from omni.physx import get_physx_scene_query_interface
 
 
 def set_transform_attributes(
@@ -193,6 +194,86 @@ def get_random_pose_on_sphere(
 
     return location, orientation
 
+def is_camera_view_clear(
+    camera_pos: Gf.Vec3d,
+    target_pos: Gf.Vec3d,
+    blocking_path_substrings: list[str] | None = None,
+    debug: bool = False,
+) -> bool:
+    """
+    Checks if the line of sight from camera to target is clear of environment obstacles.
+
+    Uses PhysX raycasting to detect if walls or environment geometry block the view.
+
+    Args:
+        camera_pos (Gf.Vec3d): Camera position in world space.
+        target_pos (Gf.Vec3d): Target position to look at.
+        blocking_path_substrings (list[str], optional): List of substrings to check in hit paths.
+            If any substring is found in the hit path, it's considered a blocker.
+            Defaults to ["wall", "exterior", "ceiling", "skirtingboard", "floor"].
+        debug (bool, optional): If True, prints debug information about raycast results.
+
+    Returns:
+        bool: True if line of sight is clear, False if blocked by environment.
+    """
+    if blocking_path_substrings is None:
+        blocking_path_substrings = ["wall", "exterior", "ceiling", "skirtingboard", "floor"]
+
+    # Calculate ray direction and distance
+    direction = target_pos - camera_pos
+    distance = direction.GetLength()
+
+    if distance < 0.01:
+        # Camera and target are essentially at the same position
+        return True
+
+    direction_normalized = direction.GetNormalized()
+
+    # Get PhysX scene query interface
+    scene_query = get_physx_scene_query_interface()
+
+    if scene_query is None:
+        print("[SDG] Warning: PhysX scene query interface not available, skipping raycast check")
+        return True
+
+    # Convert to tuple format expected by raycast (origin and direction as tuples)
+    origin = (camera_pos[0], camera_pos[1], camera_pos[2])
+    rayDir = (direction_normalized[0], direction_normalized[1], direction_normalized[2])
+
+    # Perform raycast
+    hit = scene_query.raycast_closest(origin, rayDir, distance)
+
+    if debug:
+        print(f"[SDG-Debug] Raycast from {origin} to target")
+        print(f"[SDG-Debug] Hit result: {hit}")
+        if hit:
+            print(f"[SDG-Debug] Hit keys: {hit.keys() if hasattr(hit, 'keys') else 'N/A'}")
+
+    # If no hit, view is clear
+    if not hit or not hit["hit"]:
+        if debug:
+            print(f"[SDG-Debug] No hit detected - view is CLEAR")
+        return True
+
+    # Check if the hit object is a blocker - try multiple possible keys
+    hit_path = hit.get("rigidBody", "") or hit.get("collision", "") or hit.get("protoIndex", "")
+
+    if debug:
+        print(f"[SDG-Debug] Hit path: '{hit_path}'")
+        print(f"[SDG-Debug] Checking against blocking substrings: {blocking_path_substrings}")
+
+    # If hit path contains any blocking substring, it's blocked
+    for substring in blocking_path_substrings:
+        if substring in hit_path:
+            if debug:
+                print(f"[SDG-Debug] Path '{hit_path}' contains blocker substring '{substring}' - view BLOCKED")
+            return False
+
+    # Hit something else (probably target assets or distractors), which is fine
+    if debug:
+        print(f"[SDG-Debug] Hit non-blocking object - view is CLEAR")
+    return True
+
 def randomize_camera_poses(
     cameras: list[Usd.Prim],
     targets: list[Usd.Prim],
@@ -201,11 +282,18 @@ def randomize_camera_poses(
     look_at_offset: tuple[float, float] = (-0.1, 0.1),
     per_camera_polar_angles: dict[int, tuple[float, float]] | None = None,
     keep_level_cameras: list[int] | None = None,
+    enable_collision_check: bool = True,
+    max_retries: int = 50,
+    blocking_path_substrings: list[str] | None = None,
+    debug_raycast: bool = False,
+    min_camera_height: float | None = None,
+    max_camera_height: float | None = None,
 ) -> None:
     """
     Randomizes a list of cameras to look at selected targets.
 
     Each camera picks a random target from the list and is placed on a spherical shell around it.
+    Optionally checks for line-of-sight clearance using raycasting to avoid wall occlusions.
 
     Args:
         cameras (list[Usd.Prim]): List of camera prims to update.
@@ -215,7 +303,15 @@ def randomize_camera_poses(
         look_at_offset (tuple): Random (min, max) jitter added to the look-at point.
         per_camera_polar_angles (dict, optional): Overrides polar angle range for specific camera indices.
         keep_level_cameras (list, optional): List of indices for cameras that should remain level.
+        enable_collision_check (bool, optional): If True, uses raycasting to ensure clear line of sight. Defaults to True.
+        max_retries (int, optional): Maximum number of pose generation attempts per camera. Defaults to 50.
+        blocking_path_substrings (list[str], optional): Path substrings that block camera view. Defaults to ["wall", "exterior", "ceiling", "skirtingboard", "floor"].
+        min_camera_height (float, optional): Minimum Z-coordinate for camera position. If set, camera will not be placed below this height. Defaults to None (no constraint).
+        max_camera_height (float, optional): Maximum Z-coordinate for camera position. If set, camera will not be placed above this height. Defaults to None (no constraint).
     """
+    if blocking_path_substrings is None:
+        blocking_path_substrings = ["wall", "exterior", "ceiling", "skirtingboard", "floor"]
+
     for i, cam in enumerate(cameras):
         # Get a random target asset to look at
         target_asset = random.choice(targets)
@@ -236,10 +332,80 @@ def randomize_camera_poses(
         # Determine if this camera should keep level orientation
         keep_level = keep_level_cameras is not None and i in keep_level_cameras
 
-        # Generate random camera pose
-        loc, quat = get_random_pose_on_sphere(target_loc, distance_range, camera_polar_angle_range, keep_level=keep_level)
+        # Generate random camera pose with collision checking
+        pose_found = False
+        best_pose = None
+        debug_first_attempts = debug_raycast  # Only debug first few attempts to avoid spam
+
+        for attempt in range(max_retries):
+            # Generate candidate camera pose
+            loc, quat = get_random_pose_on_sphere(target_loc, distance_range, camera_polar_angle_range, keep_level=keep_level)
+
+            # Check if collision checking is enabled
+            if not enable_collision_check:
+                # No collision check needed, accept immediately
+                best_pose = (loc, quat)
+                pose_found = True
+                break
+
+            # Debug only first 3 attempts to avoid spam
+            should_debug = debug_first_attempts and attempt < 3
+
+            # Check if the view is clear using raycast
+            if is_camera_view_clear(loc, Gf.Vec3d(target_loc), blocking_path_substrings, debug=should_debug):
+                best_pose = (loc, quat)
+                pose_found = True
+                if debug_raycast:
+                    print(f"[SDG-Debug] Camera {i} found clear view on attempt {attempt + 1}")
+                break
+
+            # Store first attempt as fallback
+            if best_pose is None:
+                best_pose = (loc, quat)
+
+        if not pose_found and enable_collision_check:
+            print(f"[SDG] Warning: Could not find clear camera view after {max_retries} attempts for camera {i} (polar range: {camera_polar_angle_range}, distance: {distance_range}). Using fallback pose.")
+            if debug_raycast:
+                print(f"[SDG-Debug] Target location: {target_loc}, Fallback camera location: {best_pose[0]}")
 
         # Set the camera's transform attributes to the generated location and orientation
+        loc, quat = best_pose
+
+        # Apply height constraints (floor and ceiling) if specified
+        height_clamped = False
+        original_height = loc[2]
+
+        if min_camera_height is not None and loc[2] < min_camera_height:
+            # Clamp the camera height to minimum (above floor)
+            loc = Gf.Vec3d(loc[0], loc[1], min_camera_height)
+            height_clamped = True
+
+        if max_camera_height is not None and loc[2] > max_camera_height:
+            # Clamp the camera height to maximum (below ceiling)
+            loc = Gf.Vec3d(loc[0], loc[1], max_camera_height)
+            height_clamped = True
+
+        # Recalculate orientation if height was clamped
+        if height_clamped:
+            if debug_raycast:
+                print(f"[SDG-Debug] Camera {i} height clamped from {original_height:.3f} to {loc[2]:.3f}")
+
+            # Recalculate orientation to maintain look-at behavior with the new height
+            direction = Gf.Vec3d(target_loc) - loc
+
+            if keep_level:
+                # Use LookAt to ensure Up vector is preserved
+                view_mat = Gf.Matrix4d()
+                view_mat.SetLookAt(loc, target_loc, Gf.Vec3d(0, 0, 1))
+                model_mat = view_mat.GetInverse()
+                rotation = model_mat.ExtractRotation()
+            else:
+                direction_normalized = direction.GetNormalized()
+                # Calculate rotation from forward direction to target direction
+                rotation = Gf.Rotation(Gf.Vec3d(0, 0, -1), direction_normalized)
+
+            quat = Gf.Quatf(rotation.GetQuat())
+
         set_transform_attributes(cam, location=loc, orientation=quat)
 
 def get_usd_paths_from_folder(
@@ -614,6 +780,54 @@ def get_matching_prim_location(match_string, root_path=None):
     else:
         print(f"[SDG-Infinigen] Could not find location attribute for '{prim.GetPath()}', returning (0, 0, 0)")
         return (0, 0, 0)
+
+def get_surface_height(
+    match_string: str,
+    offset: float,
+    add_offset: bool = True,
+    root_path: str | None = None,
+    default_value: float | None = None,
+) -> float | None:
+    """
+    Calculates camera height constraint based on a surface (floor, ceiling, etc.) position.
+
+    Args:
+        match_string (str): Substring to match in prim path (e.g., "floor", "ceiling").
+        offset (float): Offset distance from the surface.
+        add_offset (bool): If True, adds offset to surface Z (for floor). If False, subtracts (for ceiling).
+        root_path (str, optional): Root path to search for surface prim.
+        default_value (float | None, optional): Default value to return if surface not found. Defaults to None.
+
+    Returns:
+        float | None: Camera height constraint, or default_value if surface not found.
+    """
+    surface_prim = find_matching_prims(
+        match_strings=[match_string], root_path=root_path, prim_type="Xform", first_match_only=True
+    )
+
+    if surface_prim is None:
+        if default_value is not None:
+            print(f"[SDG] Warning: Could not find {match_string} prim. Using default value of {default_value}")
+        else:
+            print(f"[SDG] Warning: Could not find {match_string} prim. No constraint will be applied.")
+        return default_value
+
+    # Get surface location
+    if surface_prim.HasAttribute("xformOp:translate"):
+        surface_loc = surface_prim.GetAttribute("xformOp:translate").Get()
+    elif surface_prim.HasAttribute("xformOp:transform"):
+        surface_loc = surface_prim.GetAttribute("xformOp:transform").Get().ExtractTranslation()
+    else:
+        if default_value is not None:
+            print(f"[SDG] Warning: {match_string.capitalize()} prim found but no transform attribute. Using default value of {default_value}")
+        else:
+            print(f"[SDG] Warning: {match_string.capitalize()} prim found but no transform attribute. No constraint will be applied.")
+        return default_value
+
+    constraint_height = surface_loc[2] + offset if add_offset else surface_loc[2] - offset
+    constraint_type = "min" if add_offset else "max"
+    print(f"[SDG] {match_string.capitalize()} detected at Z={surface_loc[2]:.3f}, setting {constraint_type} camera height to {constraint_height:.3f}")
+    return constraint_height
 
 def offset_range(
     range_coords: tuple[float, float, float, float, float, float], offset: tuple[float, float, float]

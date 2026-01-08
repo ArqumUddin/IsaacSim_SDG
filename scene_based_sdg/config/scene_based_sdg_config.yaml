@@ -12,7 +12,7 @@ environments:
 
 capture:
   # Number of captures (frames = total_captures * num_cameras)
-  total_captures: 24
+  total_captures: 60
   # Number of captures per environment before running the simulation (objects in the air)
   num_floating_captures_per_env: 0
   # Number of captures per environment after running the simulation (objects dropped)
@@ -30,11 +30,23 @@ capture:
   # Offset to avoid the images always being in the image center
   camera_look_at_target_offset: 0.1
   # Distance between the camera and the target object
-  camera_distance_to_target_range: [2.5, 3.5]
+  camera_distance_to_target_range: [2, 2.]
   # Number of scene lights to create in the working area
   num_scene_lights: 4
   # Force cameras to stay level (Up vector = Z)
   keep_camera_level: true
+  # Enable raycast collision detection to prevent cameras from being placed in walls
+  enable_camera_collision_check: true
+  # Maximum number of attempts to find a clear camera position (if collision check enabled)
+  max_camera_retries: 50
+  # Path substrings that should block camera placement (walls, ceiling, floors only - not furniture)
+  # Only blocks if the hit path CONTAINS any of these substrings
+  camera_blocking_path_substrings:
+    ["wall", "exterior", "ceiling", "skirtingboard", "floor"]
+  # Enable debug output for raycast collision detection (useful for troubleshooting)
+  debug_camera_raycast: false
+  # Minimum camera height (Z-coordinate) to prevent cameras from going below floor
+  min_camera_height: 0.2
   # Specific polar angle ranges for each camera index during 'floating' capture
   floating_per_camera_angles:
     0: [0, 75]
@@ -78,7 +90,7 @@ distractors:
   # Shape distractors (unlabeled background assets) to drop in the scene (e.g. capsules, cones, cylinders)
   shape_distractors:
     # Amount of shape distractors to create
-    num: 10
+    num: 0
     # Chance to disable gravity for the shape distractors
     gravity_disabled_chance: 0.0
     # List of shape types to randomly choose from
@@ -87,7 +99,7 @@ distractors:
   # Mesh distractors (unlabeled background assets) to drop in the scene
   mesh_distractors:
     # Amount of mesh distractors to create
-    num: 7
+    num: 25
     # Chance to disable gravity for the mesh distractors
     gravity_disabled_chance: 0.0
     # List of folders and files to search to randomly choose from
@@ -97,8 +109,6 @@ distractors:
       - /Isaac/Environments/Office/Props/SM_BookOpen_01.usd
       - /Isaac/Environments/Office/Props/SM_Briefcase.usd
       - /Isaac/Environments/Office/Props/SM_Extinguisher.usd
-      - /Isaac/Environments/Hospital/Props/SM_MedicalBag_01a.usd
-      - /Isaac/Environments/Hospital/Props/SM_MedicalBox_01g.usd
 
 # Hide ceiling, move viewport camera to top-down view above the working area
 debug_mode: true
