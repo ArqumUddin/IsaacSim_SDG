@@ -211,11 +211,13 @@ class ObjectBasedSDG:
 
             # Common properties for auto-labeled assets
             scale_min_max = auto_cfg.get("scale_min_max", (1, 1))
-            floating = auto_cfg.get("floating", False)
+            # gravity_disabled_chance: probability [0.0-1.0] that an asset floats (gravity disabled)
+            # 0.0 = all fall, 1.0 = all float, 0.5 = 50% float/50% fall
+            gravity_disabled_chance = auto_cfg.get("gravity_disabled_chance", 0.0)
 
             for asset in scanned:
                 asset["scale_min_max"] = scale_min_max
-                asset["floating"] = floating
+                asset["gravity_disabled_chance"] = gravity_disabled_chance
                 self.available_assets.append(asset)
 
         # 2. Process Manual-Label
@@ -276,7 +278,9 @@ class ObjectBasedSDG:
         for obj in selected:
             obj_url = obj.get("url", "")
             label = obj.get("label", "unknown")
-            floating = obj.get("floating", False)
+            gravity_disabled_chance = obj.get("gravity_disabled_chance", 0.0)
+            # Per-asset random decision: disable gravity if random() < chance
+            floating = random.random() < gravity_disabled_chance
             scale_min_max = obj.get("scale_min_max", (1, 1))
 
             rand_loc, rand_rot, rand_scale = object_based_sdg_utils.get_random_transform_values(
@@ -304,6 +308,7 @@ class ObjectBasedSDG:
                 self.falling_labeled_prims.append(prim)
 
         self.labeled_prims = self.floating_labeled_prims + self.falling_labeled_prims
+        print(f"[SDG] Spawned: {len(self.floating_labeled_prims)} floating, {len(self.falling_labeled_prims)} falling")
 
     def setup_distractors(self):
         """
