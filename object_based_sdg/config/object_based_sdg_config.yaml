@@ -6,9 +6,9 @@ launch_config:
   headless: true
 env_url: ""
 working_area_size:
-  - 4
-  - 4
-  - 3
+  - 1
+  - 1
+  - 1
 light_config:
   count: 4
   type: "Sphere"
@@ -16,11 +16,32 @@ light_config:
   temperature_min_max: [6000, 7000]
   distant_light_intensity_min_max: [300, 600]
 rt_subframes: 4
-num_frames: 50
+num_frames: 100
 num_cameras: 4
 disable_render_products_between_captures: false
 camera_collider_radius: 0.2
 simulation_duration_between_captures: 0.0
+
+# Randomization intervals (in frames)
+# Set to 0 to disable that randomization
+randomization_intervals:
+  camera_poses: 10 # Randomize camera positions every N frames
+  velocity_pull: 10 # Pull objects toward center every N frames
+  lights: 5 # Randomize lights every N frames
+  shape_colors: 15 # Randomize shape distractor colors every N frames
+  dome_background: 25 # Change dome/environment every N frames
+  asset_reselection: 25 # Re-select random assets every N frames (0 = only on dome change)
+  distractor_velocities: 17 # Randomize floating distractor velocities every N frames
+  motion_blur_capture: 0 # Use motion blur capture every N frames (other frames use standard capture)
+
+# Camera collision settings
+camera_collision_frames: 4 # Physics frames to simulate for camera collision
+
+# Motion blur capture settings
+motion_blur:
+  duration: 0.025
+  num_samples: 8
+spp: 128
 resolution:
   - 720
   - 720
@@ -38,16 +59,18 @@ writer_kwargs:
   semantic_types: ["class"]
 
 labeled_assets:
+  # Supercategory for COCO annotations (e.g., "ycb", "household", "tools")
+  supercategory: "object"
   # Labeled assets (scanned from folders with auto-labeling)
   auto_label:
-    num: 1
+    num: 10
     gravity_disabled_chance: 0.5
     folders:
       - "/home/ubuntu/Workspace/data/glb_converted/my_glb_models"
     files: []
     regex_replace_pattern: "^[_0-9-]+"
     regex_replace_repl: ""
-    scale_min_max: [0.5, 1.0]
+    scale_min_max: [0.5, 0.75]
     randomize_color: false
     floating: true
 

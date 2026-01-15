@@ -20,11 +20,19 @@ assets:
     name_depth: 0 # Use the GLB filename for naming
     scale: 1.0
 
-    # Auto-Normalization for Mixed Units
+    # Auto-Normalization for Mixed Units (Legacy - use normalize_size instead)
     # If true, objects larger than 'auto_detection_threshold' (in world units)
-    # will be assumed to be in millimeters and scaled by 0.001.
+    # will be assumed to be in millimeters and scaled by powers of 10.
     auto_detect_units: true
     auto_detection_threshold: 1.0
+
+    # Target Size Normalization (Recommended for consistent sizing)
+    # Ensures ALL objects end up within a reasonable real-world size range.
+    # Objects too small are scaled UP, objects too large are scaled DOWN.
+    # This runs AFTER auto_detect_units to fix any remaining size issues.
+    normalize_size: true
+    target_size_min: 0.25 # Minimum size in meters (25cm)
+    target_size_max: 0.75 # Maximum size in meters (75cm)
 
     # Regex for cleaning semantic labels (applied to filename/folder name)
     # This pattern removes leading numbers, dashes, and underscores

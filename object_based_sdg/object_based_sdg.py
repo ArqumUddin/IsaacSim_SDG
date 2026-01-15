@@ -94,6 +94,8 @@ class ObjectBasedSDG:
         self.physx_sub = None
         self.unique_labels = set() # Track for Writer categories
 
+        self.available_assets = []  # Pool of all scanned assets for random selection
+
         # Config extraction
         self.working_area_size = self.config.get("working_area_size", (3, 3, 3))
         self.working_area_min = (self.working_area_size[0] / -2, self.working_area_size[1] / -2, self.working_area_size[2] / -2)
@@ -183,20 +185,19 @@ class ObjectBasedSDG:
 
     def setup_assets(self):
         """
-        Loads and spawns the labeled assets.
+        Scans and stores available labeled assets, then spawns initial random selection.
 
         Assets are gathered from the `labeled_assets` configuration block, which supports:
-        1. **Auto-scan (`auto_label`)**: Scans specified folders/files, applies regex for labeling. (V2 Schema)
+        1. **Auto-scan (`auto_label`)**: Scans specified folders/files, applies regex for labeling.
         2. **Manual config (`manual_label`)**: Explicitly listed assets with overrides.
 
-        For each asset, multiple instances are spawned based on `num` (or `count`), with
-        configurable gravity settings.
+        The scanned assets are stored in `self.available_assets` as a pool for random selection.
         """
-        all_assets = []
-        
+        self.available_assets = []
+
         # New "labeled_assets" schema
         la_config = self.config.get("labeled_assets", {})
-        
+
         # 1. Process Auto-Label
         auto_cfg = la_config.get("auto_label", {})
         if auto_cfg:
@@ -207,60 +208,101 @@ class ObjectBasedSDG:
                 regex_replace_pattern=auto_cfg.get("regex_replace_pattern"),
                 regex_replace_repl=auto_cfg.get("regex_replace_repl", "")
             )
-            
+
             # Common properties for auto-labeled assets
-            count = auto_cfg.get("num", 1)  # 'num' matches scene config style
             scale_min_max = auto_cfg.get("scale_min_max", (1, 1))
             floating = auto_cfg.get("floating", False)
 
             for asset in scanned:
-                asset["count"] = count
                 asset["scale_min_max"] = scale_min_max
                 asset["floating"] = floating
-                all_assets.append(asset)
+                self.available_assets.append(asset)
 
         # 2. Process Manual-Label
         manual_cfg = la_config.get("manual_label", [])
         if manual_cfg:
             for item in manual_cfg:
-                # Normalize keys (scene config uses 'num', our old one used 'count')
-                item["count"] = item.get("num", item.get("count", 1))
-                all_assets.append(item)
+                self.available_assets.append(item)
 
-        print(f"[SDG] Total unique assets to spawn: {len(all_assets)}")
+        print(f"[SDG] Total available assets in pool: {len(self.available_assets)}")
 
-        for obj in all_assets:
+        # Pre-populate unique_labels with ALL labels from the pool
+        # This ensures the writer has all possible categories, even if not all are spawned initially
+        for asset in self.available_assets:
+            label = asset.get("label", "unknown")
+            self.unique_labels.add(label)
+        print(f"[SDG] Total unique labels in pool: {len(self.unique_labels)}")
+
+        # Spawn initial random selection
+        self.spawn_random_labeled_assets()
+
+    def spawn_random_labeled_assets(self):
+        """
+        Clears existing labeled assets and spawns a new random selection from the pool.
+
+        This method:
+        1. Removes any existing labeled prims from the stage
+        2. Randomly selects N assets from `self.available_assets`
+        3. Spawns each selected asset with random transforms
+
+        Called during initial setup and whenever the environment changes.
+        """
+        # 1. Clear existing labeled prims
+        for prim in self.labeled_prims:
+            if prim.IsValid():
+                self.stage.RemovePrim(prim.GetPath())
+        self.labeled_prims = []
+        self.floating_labeled_prims = []
+        self.falling_labeled_prims = []
+
+        # 2. Get count from config
+        la_config = self.config.get("labeled_assets", {})
+        auto_cfg = la_config.get("auto_label", {})
+        count = auto_cfg.get("num", 1)
+
+        # 3. Random selection from pool
+        if not self.available_assets:
+            print("[SDG] No assets available in pool")
+            return
+
+        if len(self.available_assets) <= count:
+            selected = self.available_assets
+        else:
+            selected = random.sample(self.available_assets, count)
+
+        print(f"[SDG] Spawning {len(selected)} randomly selected assets")
+
+        # 4. Spawn each selected asset
+        for obj in selected:
             obj_url = obj.get("url", "")
             label = obj.get("label", "unknown")
-            count = obj.get("count", 1)
             floating = obj.get("floating", False)
             scale_min_max = obj.get("scale_min_max", (1, 1))
 
-            for _ in range(count):
-                rand_loc, rand_rot, rand_scale = object_based_sdg_utils.get_random_transform_values(
-                    loc_min=self.working_area_min, loc_max=self.working_area_max, scale_min_max=scale_min_max
-                )
+            rand_loc, rand_rot, rand_scale = object_based_sdg_utils.get_random_transform_values(
+                loc_min=self.working_area_min, loc_max=self.working_area_max, scale_min_max=scale_min_max
+            )
 
-                prim_path = omni.usd.get_stage_next_free_path(self.stage, f"/World/Labeled/{label}", False)
-                prim = self.stage.DefinePrim(prim_path, "Xform")
+            prim_path = omni.usd.get_stage_next_free_path(self.stage, f"/World/Labeled/{label}", False)
+            prim = self.stage.DefinePrim(prim_path, "Xform")
 
-                if obj_url.startswith("omniverse://") or os.path.isabs(obj_url):
-                    asset_path = obj_url
-                else:
-                    asset_path = self.assets_root_path + obj_url
+            if obj_url.startswith("omniverse://") or os.path.isabs(obj_url):
+                asset_path = obj_url
+            else:
+                asset_path = self.assets_root_path + obj_url
 
-                prim.GetReferences().AddReference(asset_path)
-                object_based_sdg_utils.set_transform_attributes(prim, location=rand_loc, rotation=rand_rot, scale=rand_scale)
-                object_based_sdg_utils.add_colliders(prim)
-                object_based_sdg_utils.add_rigid_body_dynamics(prim, disable_gravity=floating)
-                add_labels(prim, labels=[label], instance_name="class")
-                self.unique_labels.add(label)
+            prim.GetReferences().AddReference(asset_path)
+            object_based_sdg_utils.set_transform_attributes(prim, location=rand_loc, rotation=rand_rot, scale=rand_scale)
+            object_based_sdg_utils.add_colliders(prim)
+            object_based_sdg_utils.add_rigid_body_dynamics(prim, disable_gravity=floating)
+            add_labels(prim, labels=[label], instance_name="class")
+            self.unique_labels.add(label)
 
-                if floating:
-                    self.floating_labeled_prims.append(prim)
-                else:
-                    self.falling_labeled_prims.append(prim)
-        
+            if floating:
+                self.floating_labeled_prims.append(prim)
+            else:
+                self.falling_labeled_prims.append(prim)
+
         self.labeled_prims = self.floating_labeled_prims + self.falling_labeled_prims
 
     def setup_distractors(self):
@@ -423,26 +465,79 @@ class ObjectBasedSDG:
         categories = {}
         # Use the set we populated during spawning (Robuster than querying USD attributes)
         ordered_labels = sorted(list(self.unique_labels))
-        
+
+        # Get supercategory from config (defaults to "object")
+        la_config = self.config.get("labeled_assets", {})
+        supercategory = la_config.get("supercategory", "object")
+
         print(f"[SDG] Found {len(ordered_labels)} unique labels: {ordered_labels}")
 
         for i, label in enumerate(ordered_labels):
             # ID 0 is usually reserved for background
             cat_id = i + 1
-            
+
             # Generate a consistent color hash or random
             # Just using random for now effectively, but seeding could make it deterministic
             color = [random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)]
-            
+
             categories[label] = {
                 "name": label,
                 "id": cat_id,
-                "supercategory": "ycb",
+                "supercategory": supercategory,
                 "isthing": 1,
                 "color": color
             }
-            
+
         return categories
+
+    def inject_all_categories_to_coco(self):
+        """
+        Post-processes COCO JSON to ensure ALL categories from unique_labels are included,
+        even if they have no annotations in the generated images.
+
+        Uses the SAME deterministic ID mapping from _generate_coco_categories() to ensure
+        consistency - IDs are assigned based on alphabetical order of labels.
+        """
+        import json
+
+        writer_kwargs = self.config.get("writer_kwargs", {})
+        output_dir = writer_kwargs.get("output_dir", "")
+
+        coco_file = os.path.join(output_dir, "coco_annotations.json")
+        if not os.path.exists(coco_file):
+            print(f"[SDG] COCO file not found: {coco_file}")
+            return
+
+        with open(coco_file, 'r') as f:
+            coco_data = json.load(f)
+
+        # Get existing category names (IDs are already correct from generation)
+        existing_names = {cat['name'] for cat in coco_data.get('categories', [])}
+
+        # Get the FULL category mapping with original deterministic IDs
+        # (IDs are assigned alphabetically: sorted label at index 0 → ID 1, etc.)
+        all_categories = self._generate_coco_categories()
+
+        # Add missing categories with their ORIGINAL IDs
+        added = 0
+        for label, cat_info in all_categories.items():
+            if label not in existing_names:
+                coco_data['categories'].append({
+                    "id": cat_info["id"],  # Use original deterministic ID
+                    "name": label,
+                    "supercategory": cat_info.get("supercategory", "object")
+                })
+                added += 1
+
+        # Sort categories by ID for cleaner output
+        coco_data['categories'] = sorted(coco_data['categories'], key=lambda x: x['id'])
+
+        if added > 0:
+            with open(coco_file, 'w') as f:
+                json.dump(coco_data, f, indent=2)
+            print(f"[SDG] Injected {added} additional categories. Total: {len(coco_data['categories'])}")
+        else:
+            print(f"[SDG] All {len(coco_data['categories'])} categories already present")
 
     def setup_randomizers(self):
         """
@@ -696,40 +791,62 @@ class ObjectBasedSDG:
 
         wall_start = time.perf_counter()
 
+        # Get randomization intervals from config (0 = disabled)
+        intervals = self.config.get("randomization_intervals", {})
+        interval_camera = intervals.get("camera_poses", 3)
+        interval_velocity = intervals.get("velocity_pull", 10)
+        interval_lights = intervals.get("lights", 5)
+        interval_shape_colors = intervals.get("shape_colors", 15)
+        interval_dome = intervals.get("dome_background", 25)
+        interval_asset_reselection = intervals.get("asset_reselection", 25)
+        interval_distractor_vel = intervals.get("distractor_velocities", 17)
+        interval_motion_blur = intervals.get("motion_blur_capture", 5)
+
+        # Camera collision and motion blur settings
+        camera_collision_frames = self.config.get("camera_collision_frames", 4)
+        motion_blur_cfg = self.config.get("motion_blur", {})
+        mb_duration = motion_blur_cfg.get("duration", 0.025)
+        mb_samples = motion_blur_cfg.get("num_samples", 8)
+        mb_spp = motion_blur_cfg.get("spp", 128)
+
         for i in range(self.num_frames):
             print(f"[SDG] Processing Frame {i+1}/{self.num_frames}")
 
             # 1. Camera Randomization
-            if i % 3 == 0:
+            if interval_camera > 0 and i % interval_camera == 0:
                 self.randomize_camera_poses()
                 if self.camera_colliders:
-                    self.simulate_camera_collision(frames=4)
+                    self.simulate_camera_collision(frames=camera_collision_frames)
 
             # 2. Velocity Pull
-            if i % 10 == 0:
+            if interval_velocity > 0 and i % interval_velocity == 0:
                 object_based_sdg_utils.apply_velocities_towards_target(
                     chain(self.labeled_prims, self.shape_distractors, self.mesh_distractors)
                 )
 
             # 3. Lights
-            if i % 5 == 0:
+            if interval_lights > 0 and i % interval_lights == 0:
                 rep.utils.send_og_event(event_name="randomize_lights")
 
             # 4. Shape Colors
-            if i % 15 == 0:
+            if interval_shape_colors > 0 and i % interval_shape_colors == 0:
                 rep.utils.send_og_event(event_name="randomize_shape_distractor_colors")
 
-            # 5. Dome
-            if i % 25 == 0:
+            # 5. Dome Background
+            if interval_dome > 0 and i % interval_dome == 0:
                 rep.utils.send_og_event(event_name="randomize_dome_background")
 
-            # 6. Distractor Velocities
-            if i % 17 == 0:
+            # 6. Asset Re-selection (can be tied to dome or independent)
+            if interval_asset_reselection > 0 and i % interval_asset_reselection == 0:
+                self.spawn_random_labeled_assets()
+
+            # 7. Distractor Velocities
+            if interval_distractor_vel > 0 and i % interval_distractor_vel == 0:
                 object_based_sdg_utils.randomize_floating_distractor_velocities(
                     chain(self.floating_shape_distractors, self.floating_mesh_distractors)
                 )
 
-            # 7. Asset Colors (if configured)
+            # 8. Asset Colors (if configured)
             if self.config.get("assets", {}).get("properties", {}).get("randomize_color", False):
                 rep.utils.send_og_event(event_name="randomize_asset_appearance")
 
@@ -737,8 +854,8 @@ class ObjectBasedSDG:
             if self.disable_render_products_between_captures:
                 object_based_sdg_utils.set_render_products_updates(self.render_products, True)
 
-            if i % 5 == 0:
-                self.capture_with_motion_blur(duration=0.025, num_samples=8, spp=128)
+            if interval_motion_blur > 0 and i % interval_motion_blur == 0:
+                self.capture_with_motion_blur(duration=mb_duration, num_samples=mb_samples, spp=mb_spp)
             else:
                 rep.orchestrator.step(delta_time=0.0, rt_subframes=self.rt_subframes, pause_timeline=False)
 
@@ -755,6 +872,10 @@ class ObjectBasedSDG:
         
         wall_end = time.perf_counter()
         print(f"[SDG] Finished. Total time: {wall_end - wall_start:.2f}s")
+
+        # Post-process to ensure all categories are in COCO output
+        if self.config.get("writer_type") == "CocoWriter":
+            self.inject_all_categories_to_coco()
 
         if self.physx_sub:
             self.physx_sub.unsubscribe()

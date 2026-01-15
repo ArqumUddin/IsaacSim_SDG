@@ -354,23 +354,6 @@ def validate_and_correct_scale(stage, root_prim, threshold, raw_size=None, appli
 
     scale_mesh_vertices(root_prim, correction)
 
-    # Update the scale op on root for reference
-    xform = UsdGeom.Xformable(root_prim)
-    scale_op = None
-    for op in xform.GetOrderedXformOps():
-        if op.GetOpType() == UsdGeom.XformOp.TypeScale:
-            scale_op = op
-            break
-
-    if scale_op:
-        current_scale = scale_op.Get()
-        new_scale = (
-            current_scale[0] * correction,
-            current_scale[1] * correction,
-            current_scale[2] * correction
-        )
-        scale_op.Set(new_scale)
-
     # Calculate final world size after correction
     final_world_size = actual_world_size * correction
     print(f"    [VALIDATION] Final size after correction: {final_world_size:.3f}m")
@@ -378,7 +361,62 @@ def validate_and_correct_scale(stage, root_prim, threshold, raw_size=None, appli
     return (final_world_size, True)
 
 
-def post_process_usd(stage_path, name, scale, semantic_label, source_path, auto_detect_units=False, threshold=50.0):
+def normalize_to_target_size(root_prim, target_min=0.05, target_max=1.5):
+    """
+    Normalize object to fit within target size range by scaling mesh vertices.
+
+    This function ensures all objects end up at reasonable real-world sizes,
+    regardless of what units the source file used. Objects smaller than target_min
+    are scaled up, objects larger than target_max are scaled down.
+
+    Uses vertex scaling (not transform ops) to avoid double-scaling issues when
+    the USD is loaded elsewhere.
+
+    Args:
+        root_prim: Root prim of the object
+        target_min: Minimum acceptable size in meters (default 0.05m = 5cm)
+        target_max: Maximum acceptable size in meters (default 1.5m)
+
+    Returns:
+        tuple: (final_size, scale_was_applied)
+    """
+    # Get current world size
+    bbox_cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(), [UsdGeom.Tokens.default_])
+    bound = bbox_cache.ComputeWorldBound(root_prim)
+    size = bound.GetRange().GetSize()
+    max_dim = max(size[0], size[1], size[2])
+
+    if max_dim <= 0:
+        print(f"    [NORMALIZE] Warning: Zero or negative size detected")
+        return (0, False)
+
+    # Determine if scaling needed
+    if target_min <= max_dim <= target_max:
+        print(f"    [NORMALIZE] Size {max_dim:.3f}m within target range [{target_min}, {target_max}]")
+        return (max_dim, False)
+
+    # Calculate scale factor
+    if max_dim < target_min:
+        # Object too small - scale up to minimum
+        target = target_min
+        scale_factor = target / max_dim
+        action = "Scale UP"
+    else:
+        # Object too large - scale down to maximum
+        target = target_max
+        scale_factor = target / max_dim
+        action = "Scale DOWN"
+
+    print(f"    [NORMALIZE] {action}: {max_dim:.3f}m -> {target:.3f}m (factor: {scale_factor:.4f})")
+
+    # Scale mesh vertices directly (not transform ops) to avoid double-scaling
+    scale_mesh_vertices(root_prim, scale_factor)
+
+    return (target, True)
+
+
+def post_process_usd(stage_path, name, scale, semantic_label, source_path, auto_detect_units=False, threshold=50.0,
+                     normalize_size=False, target_size_min=0.05, target_size_max=1.5):
     """
     Opens the converted USD and adds Physics, Collision, Semantics, Scale, and Material Fallback.
 
@@ -442,13 +480,14 @@ def post_process_usd(stage_path, name, scale, semantic_label, source_path, auto_
     # Apply Scale by directly modifying mesh vertices
     # Transform-based scaling doesn't work reliably because the native converter
     # creates USD hierarchies where parent transforms don't propagate to geometry
-    final_scale = (scale, scale, scale)
-
     if scale != 1.0:
         print(f"    Scaling mesh vertices by factor: {scale}")
         scale_mesh_vertices(root_prim, scale)
 
-    # Also set a scale op on root for reference (though it may not affect world bound)
+    # Set scale op to (1,1,1) since we already scaled the vertices
+    # This prevents double-scaling when the USD is loaded elsewhere
+    # (e.g., SDG multiplies existing scale by random scale)
+    final_scale = (1.0, 1.0, 1.0)
     xform = UsdGeom.Xformable(root_prim)
     scale_op = None
     for op in xform.GetOrderedXformOps():
@@ -478,13 +517,27 @@ def post_process_usd(stage_path, name, scale, semantic_label, source_path, auto_
                     final_scale = op.Get()
                     break
 
+    # Target Size Normalization (runs AFTER auto_detect to ensure final size is reasonable)
+    # This catches objects that ended up too small or too large after initial scaling
+    normalize_applied = False
+    if normalize_size:
+        final_world_size, normalize_applied = normalize_to_target_size(
+            root_prim, target_size_min, target_size_max
+        )
+        if normalize_applied:
+            action_taken = "Size Normalization" if action_taken == "None" else action_taken + " + Size Normalization"
+            # Scale op remains (1,1,1) since we scaled vertices directly
+
     # Explicit Report for User
     print(f"  [RESULT] Asset: {name}")
-    print(f"           Detected Size: {detected_size:.3f} (Threshold: {threshold})")
+    if auto_detect_units:
+        print(f"           Detected Size: {detected_size:.3f} (Threshold: {threshold})")
     print(f"           Action: {action_taken}")
     print(f"           Final Scale: ({final_scale[0]:.6f}, {final_scale[1]:.6f}, {final_scale[2]:.6f})")
-    if auto_detect_units:
+    if auto_detect_units or normalize_size:
         print(f"           Final World Size: {final_world_size:.3f}m")
+    if normalize_size:
+        print(f"           Target Range: [{target_size_min}, {target_size_max}]m")
     print(f"           Post-process complete.\n")
 
     # Apply Semantics
@@ -511,7 +564,9 @@ def post_process_usd(stage_path, name, scale, semantic_label, source_path, auto_
     stage.GetRootLayer().Save()
     print(f"    Post-process complete for {name}")
 
-async def process_asset_chain(name, source_path, dest_folder, scale, semantic_label, auto_detect_units=False, threshold=50.0):
+async def process_asset_chain(name, source_path, dest_folder, scale, semantic_label,
+                              auto_detect_units=False, threshold=50.0,
+                              normalize_size=False, target_size_min=0.05, target_size_max=1.5):
     """
     Process a single asset through native conversion and post-processing.
 
@@ -521,6 +576,11 @@ async def process_asset_chain(name, source_path, dest_folder, scale, semantic_la
         dest_folder (str): The destination folder for the converted asset.
         scale (float): The scale factor for the asset.
         semantic_label (str): The semantic label for the asset.
+        auto_detect_units (bool): Enable auto unit detection and scaling.
+        threshold (float): Threshold for auto unit detection.
+        normalize_size (bool): Enable target size normalization.
+        target_size_min (float): Minimum target size in meters.
+        target_size_max (float): Maximum target size in meters.
     """
     if not os.path.exists(dest_folder):
         os.makedirs(dest_folder)
@@ -534,7 +594,8 @@ async def process_asset_chain(name, source_path, dest_folder, scale, semantic_la
 
     success = await convert_asset_native(abs_source, abs_dest)
     if success:
-        post_process_usd(abs_dest, usd_safe_name, scale, semantic_label, abs_source, auto_detect_units, threshold)
+        post_process_usd(abs_dest, usd_safe_name, scale, semantic_label, abs_source,
+                        auto_detect_units, threshold, normalize_size, target_size_min, target_size_max)
     else:
         print(f"Skipping post-process for {name} due to conversion failure.")
 
@@ -588,8 +649,13 @@ async def run_conversion_async(config):
         base_scale = group.get("scale", 1.0)
         auto_detect_units = group.get("auto_detect_units", False)
         threshold = group.get("auto_detection_threshold", 50.0)
-        
+        normalize_size = group.get("normalize_size", False)
+        target_size_min = group.get("target_size_min", 0.05)
+        target_size_max = group.get("target_size_max", 1.5)
+
         print(f"  Group '{group_name}' using scale: {base_scale}. Auto-Detect Units: {auto_detect_units}")
+        if normalize_size:
+            print(f"    Target Size Normalization: [{target_size_min}, {target_size_max}]m")
 
         # Supported mesh formats for conversion
         supported_extensions = [".obj", ".glb", ".gltf", ".fbx"]
@@ -679,7 +745,8 @@ async def run_conversion_async(config):
             if safe_name and safe_name[0].isdigit():
                 safe_name = f"_{safe_name}"
             s = t.get("scale", base_scale)
-            await process_asset_chain(safe_name, t["path"], group_dest, s, t["label"], auto_detect_units, threshold)
+            await process_asset_chain(safe_name, t["path"], group_dest, s, t["label"],
+                                      auto_detect_units, threshold, normalize_size, target_size_min, target_size_max)
             
     print("All conversions completed.")
 
