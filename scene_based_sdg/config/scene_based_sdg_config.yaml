@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-
+log_level: "INFO"
 launch_config:
   headless: true
 
@@ -11,14 +11,40 @@ environments:
   files: []
 
 capture:
-  # Number of captures (frames = total_captures * num_cameras)
-  total_captures: 60
-  # Number of captures per environment before running the simulation (objects in the air)
-  num_floating_captures_per_env: 0
-  # Number of captures per environment after running the simulation (objects dropped)
-  num_dropped_captures_per_env: 6
-  # Number of cameras to capture from (each camera will have a render product attached)
-  num_cameras: 4
+  # Total number of captures across all environments (frames = total_captures * num_cameras)
+  total_captures: 80
+  # Number of captures per environment
+  num_captures_per_env: 20
+
+  # Per-camera configuration - each camera can have its own strategy and settings
+  cameras:
+    - index: 0
+      strategy: "object_centric" # This camera orbits around objects
+      properties:
+        focalLength: 50.0
+      object_centric:
+        polar_angle_range: [0, 25] # Top-down views
+        distance_range: [0.75, 1.0]
+        look_at_offset: [-0.1, 0.1]
+        keep_level: true
+    - index: 1
+      strategy: "object_centric" # This camera orbits around objects
+      properties:
+        focalLength: 50.0
+      object_centric:
+        polar_angle_range: [85, 95] # Top-down views
+        distance_range: [0.75, 1.0]
+        look_at_offset: [-0.1, 0.1]
+        keep_level: true
+    - index: 2
+      strategy: "brownian_motion" # This camera wanders through the scene like a robot
+      properties:
+        focalLength: 36.0
+      brownian_motion:
+        step_size: 0.1 # Distance per step in the random walk
+        num_waypoints: 50 # Number of waypoints in the path
+        pitch_angle_range: [-15, 15] # Vertical look angle variation
+
   # Resolution of the captured frames
   resolution: [720, 720]
   # Disable render products throughout the pipeline, enable them only when capturing the frames
@@ -27,36 +53,34 @@ capture:
   rt_subframes: 8
   # Use PathTracing renderer instead of RayTracedLighting when capturing the frames
   path_tracing: true
-  # Offset to avoid the images always being in the image center
-  camera_look_at_target_offset: 0.1
-  # Distance between the camera and the target object
-  camera_distance_to_target_range: [2, 2.]
   # Number of scene lights to create in the working area
   num_scene_lights: 4
-  # Force cameras to stay level (Up vector = Z)
-  keep_camera_level: true
-  # Enable raycast collision detection to prevent cameras from being placed in walls
-  enable_camera_collision_check: true
-  # Maximum number of attempts to find a clear camera position (if collision check enabled)
-  max_camera_retries: 50
-  # Path substrings that should block camera placement (walls, ceiling, floors only - not furniture)
-  # Only blocks if the hit path CONTAINS any of these substrings
-  camera_blocking_path_substrings:
-    ["wall", "exterior", "ceiling", "skirtingboard", "floor"]
-  # Enable debug output for raycast collision detection (useful for troubleshooting)
-  debug_camera_raycast: false
-  # Minimum camera height (Z-coordinate) to prevent cameras from going below floor
-  min_camera_height: 0.2
-  # Specific polar angle ranges for each camera index during 'floating' capture
-  floating_per_camera_angles:
-    0: [0, 75]
-    1: [80, 100]
-  # Specific polar angle ranges for each camera index during 'dropped' capture
-  dropped_per_camera_angles:
-    0: [0, 25]
-    1: [25, 50]
-    2: [75, 100]
-    3: [85, 95]
+  # Offset from floor/ceiling to constrain camera height (dynamically calculated based on environment)
+  camera_height_offset: 0.2
+
+  # Adaptive scaling: makes small rooms feel bigger by scaling objects down
+  adaptive_scaling:
+    enabled: true
+    target_room_size: 5.0 # Target "virtual" room size in meters
+    min_scale_factor: 0.15 # Don't scale below 15% of original size
+    max_scale_factor: 1.0 # Don't scale up beyond original size
+
+  # Room bounds calculation
+  wall_clearance: 0.3 # Inward buffer from walls (meters)
+
+  # Camera collision settings
+  camera_collision_enabled: true # Enable collision spheres on cameras
+  camera_collision_radius: 0.15 # Collision sphere radius in meters (15cm)
+
+# Object placement configuration
+object_placement:
+  # Furniture detection
+  furniture_keywords: ["Table", "Counter", "Shelf", "Desk", "Cabinet"]
+  min_surface_area: 0.1 # Minimum surface area (m²)
+
+  # Surface placement
+  surface_placement_ratio: 0.5 # 50% on surfaces, 50% on floor
+  surface_height_offset: 0.02 # Offset above surface
 
 writers:
   # Type of the writer to use (e.g. PoseWriter, BasicWriter, etc.) and the kwargs to pass to the writer init
@@ -74,7 +98,7 @@ labeled_assets:
   auto_label:
     # Number of labeled assets to create from the given files/folders list
     num: 1
-    # Chance to disable gravity for the labeled assets (0.0 - all the assets will fall, 1.0 - all the assets will float)
+    # Chance to disable gravity for the labeled assets (0.0 - all the aAssets will fall, 1.0 - all the assets will float)
     gravity_disabled_chance: 0.0
     # List of folders and files to search for the labeled assets
     folders:
@@ -84,7 +108,10 @@ labeled_assets:
     regex_replace_pattern: "^[_0-9-]+"
     regex_replace_repl: ""
     scale_min_max: [0.85, 1.15]
-    max_asset_types_to_load: 25
+    # Load all available assets (when true, ignores max_asset_types_to_load)
+    load_all_assets: true
+    # Maximum number of asset types to load (only used if load_all_assets is false)
+    max_asset_types_to_load: 70
 
 distractors:
   # Shape distractors (unlabeled background assets) to drop in the scene (e.g. capsules, cones, cylinders)
@@ -99,7 +126,7 @@ distractors:
   # Mesh distractors (unlabeled background assets) to drop in the scene
   mesh_distractors:
     # Amount of mesh distractors to create
-    num: 25
+    num: 0
     # Chance to disable gravity for the mesh distractors
     gravity_disabled_chance: 0.0
     # List of folders and files to search to randomly choose from
