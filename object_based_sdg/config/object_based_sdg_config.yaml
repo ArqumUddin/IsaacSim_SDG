@@ -26,8 +26,8 @@ resolution:
   - 720
 camera_look_at_target_offset: 0.15
 camera_distance_to_target_min_max:
-  - 0.75
-  - 1.5
+  - 2
+  - 4
 writer_type: "CocoWriter"
 writer_kwargs:
   output_dir: "/home/ubuntu/Workspace/data/object_based_sdg_data"
@@ -40,14 +40,14 @@ writer_kwargs:
 labeled_assets:
   # Labeled assets (scanned from folders with auto-labeling)
   auto_label:
-    num: 5
+    num: 1
     gravity_disabled_chance: 0.5
     folders:
-      - "/home/ubuntu/Workspace/data/ycb/ycb_objects"
+      - "/home/ubuntu/Workspace/data/glb_converted/my_glb_models"
     files: []
     regex_replace_pattern: "^[_0-9-]+"
     regex_replace_repl: ""
-    scale_min_max: [0.75, 1.25]
+    scale_min_max: [0.5, 1.0]
     randomize_color: false
     floating: true
 
@@ -60,7 +60,7 @@ shape_distractors_types:
 shape_distractors_scale_min_max:
   - 0.015
   - 0.15
-shape_distractors_num: 150
+shape_distractors_num: 0
 mesh_distractors_urls:
   - /Isaac/Environments/Simple_Warehouse/Props/SM_CardBoxD_04_1847.usd
   - /Isaac/Environments/Simple_Warehouse/Props/SM_CardBoxA_01_414.usd
@@ -79,4 +79,4 @@ mesh_distractors_urls:
 mesh_distractors_scale_min_max:
   - 0.35
   - 1.35
-mesh_distractors_num: 75
+mesh_distractors_num: 0

@@ -51,7 +51,23 @@ def set_transform_attributes(prim, location=None, orientation=None, rotation=Non
     if scale is not None:
         if not prim.HasAttribute("xformOp:scale"):
             UsdGeom.Xformable(prim).AddScaleOp()
-        prim.GetAttribute("xformOp:scale").Set(scale)
+        
+        # Respect existing scale from referenced assets (Weak Layer)
+        # by multiplying the new random scale (Strong Layer) with it.
+        existing_scale = prim.GetAttribute("xformOp:scale").Get()
+        
+        if existing_scale:
+            # Perform component-wise multiplication
+            # Ensure we handle Gf.Vec3f or tuple types correctly by explicit component access
+            final_scale = Gf.Vec3f(
+                scale[0] * existing_scale[0],
+                scale[1] * existing_scale[1],
+                scale[2] * existing_scale[2]
+            )
+        else:
+            final_scale = scale
+            
+        prim.GetAttribute("xformOp:scale").Set(final_scale)
 
 def add_colliders(root_prim):
     """
@@ -201,19 +217,20 @@ def get_random_transform_values(
         scale_min_max (tuple): Min and Max scalar for uniform scaling.
 
     Returns:
-        tuple: (location, rotation, scale) where each is a tuple of 3 floats.
+        tuple: (location, rotation, scale) where each is a Gf type for proper USD compatibility.
     """
-    location = (
+    location = Gf.Vec3d(
         random.uniform(loc_min[0], loc_max[0]),
         random.uniform(loc_min[1], loc_max[1]),
         random.uniform(loc_min[2], loc_max[2]),
     )
-    rotation = (
+    rotation = Gf.Vec3f(
         random.uniform(rot_min[0], rot_max[0]),
         random.uniform(rot_min[1], rot_max[1]),
         random.uniform(rot_min[2], rot_max[2]),
     )
-    scale = tuple([random.uniform(scale_min_max[0], scale_min_max[1])] * 3)
+    scale_val = random.uniform(scale_min_max[0], scale_min_max[1])
+    scale = Gf.Vec3f(scale_val, scale_val, scale_val)
     return location, rotation, scale
 
 def get_random_pose_on_sphere(origin, radius, camera_forward_axis=(0, 0, -1)):

@@ -43,7 +43,7 @@ import usdrt
 from isaacsim.core.utils.semantics import add_labels, remove_labels, upgrade_prim_semantics_to_labels
 from isaacsim.storage.native import get_assets_root_path
 from omni.physx import get_physx_interface, get_physx_scene_query_interface
-from pxr import PhysxSchema, Sdf, UsdGeom, UsdPhysics
+from pxr import Gf, PhysxSchema, Sdf, UsdGeom, UsdPhysics
 
 import object_based_sdg_utils
 
@@ -240,14 +240,15 @@ class ObjectBasedSDG:
                 rand_loc, rand_rot, rand_scale = object_based_sdg_utils.get_random_transform_values(
                     loc_min=self.working_area_min, loc_max=self.working_area_max, scale_min_max=scale_min_max
                 )
+
                 prim_path = omni.usd.get_stage_next_free_path(self.stage, f"/World/Labeled/{label}", False)
                 prim = self.stage.DefinePrim(prim_path, "Xform")
-                
+
                 if obj_url.startswith("omniverse://") or os.path.isabs(obj_url):
                     asset_path = obj_url
                 else:
                     asset_path = self.assets_root_path + obj_url
-                    
+
                 prim.GetReferences().AddReference(asset_path)
                 object_based_sdg_utils.set_transform_attributes(prim, location=rand_loc, rotation=rand_rot, scale=rand_scale)
                 object_based_sdg_utils.add_colliders(prim)
@@ -457,12 +458,13 @@ class ObjectBasedSDG:
         fired periodically in the main loop.
         """
         
-        # Shape Colors
-        with rep.trigger.on_custom_event(event_name="randomize_shape_distractor_colors"):
-            paths = [p.GetPath() for p in chain(self.floating_shape_distractors, self.falling_shape_distractors)]
-            group = rep.create.group(paths)
-            with group:
-                rep.randomizer.color(colors=rep.distribution.uniform((0, 0, 0), (1, 1, 1)))
+        # Shape Colors (only if there are shape distractors)
+        if self.floating_shape_distractors or self.falling_shape_distractors:
+            with rep.trigger.on_custom_event(event_name="randomize_shape_distractor_colors"):
+                paths = [p.GetPath() for p in chain(self.floating_shape_distractors, self.falling_shape_distractors)]
+                group = rep.create.group(paths)
+                with group:
+                    rep.randomizer.color(colors=rep.distribution.uniform((0, 0, 0), (1, 1, 1)))
 
         # Lights
         with rep.trigger.on_custom_event(event_name="randomize_lights"):
