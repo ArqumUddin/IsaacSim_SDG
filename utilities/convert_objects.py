@@ -4,6 +4,7 @@ import yaml
 import shutil
 import glob
 import asyncio
+import re
 from pathlib import Path
 
 # Note: Omniverse kits must be launched before importing omni modules
@@ -22,6 +23,7 @@ from isaacsim.core.prims import SingleRigidPrim as RigidPrim, SingleGeometryPrim
 from pxr import UsdGeom, UsdPhysics, Gf, Usd, UsdShade, Sdf
 import omni.usd
 import omni.kit.asset_converter
+
 
 def load_config(config_path):
     """
@@ -57,6 +59,7 @@ async def convert_asset_native(source_path, output_path):
     context.use_meter_as_world_unit = True # Ensure typical Isaac Sim scale
     context.merge_all_meshes = True
     context.ignore_animations = True
+    context.export_preview_surface = False  # Use original materials
     
     print(f"  Native Conversion: {source_path} -> {output_path}")
     task = converter.create_converter_task(source_path, output_path, None, context)
@@ -236,7 +239,146 @@ def texture_application(stage, root_prim_path, source_obj_path):
     
     print(f"    [Hybrid] Forced texture binding: {texture_path} (StrongerThanDescendants)")
 
-def post_process_usd(stage_path, name, scale, semantic_label, source_path):
+def scale_mesh_vertices(root_prim, scale_factor):
+    """
+    Directly scale mesh vertex positions by the given factor.
+
+    This is a more aggressive approach that modifies the actual mesh data
+    rather than relying on transforms, which may not propagate correctly
+    in some USD hierarchies.
+
+    Args:
+        root_prim: The root USD prim containing meshes.
+        scale_factor: The uniform scale factor to apply to all vertices.
+    """
+    for descendant in Usd.PrimRange(root_prim):
+        if descendant.IsA(UsdGeom.Mesh):
+            mesh = UsdGeom.Mesh(descendant)
+            points_attr = mesh.GetPointsAttr()
+            if points_attr and points_attr.HasValue():
+                points = points_attr.Get()
+                if points:
+                    # Scale each vertex position
+                    scaled_points = [Gf.Vec3f(p[0] * scale_factor, p[1] * scale_factor, p[2] * scale_factor) for p in points]
+                    points_attr.Set(scaled_points)
+
+                    # Also update the extent attribute if it exists
+                    extent_attr = mesh.GetExtentAttr()
+                    if extent_attr and extent_attr.HasValue():
+                        extent = extent_attr.Get()
+                        if extent and len(extent) == 2:
+                            scaled_extent = [
+                                Gf.Vec3f(extent[0][0] * scale_factor, extent[0][1] * scale_factor, extent[0][2] * scale_factor),
+                                Gf.Vec3f(extent[1][0] * scale_factor, extent[1][1] * scale_factor, extent[1][2] * scale_factor)
+                            ]
+                            extent_attr.Set(scaled_extent)
+
+                    print(f"    Scaled mesh vertices: {descendant.GetPath()}")
+
+
+def compute_raw_geometry_extent(root_prim):
+    """
+    Compute the raw untransformed extent of geometry under a prim.
+
+    This bypasses any transform issues by using ComputeUntransformedBound
+    and falling back to reading mesh extent attributes directly.
+
+    Args:
+        root_prim: The root USD prim to compute extent for.
+
+    Returns:
+        float: Maximum dimension of untransformed geometry, or 0.0 if no geometry found.
+    """
+    # Method 1: Use USD's ComputeUntransformedBound
+    bbox_cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(), [UsdGeom.Tokens.default_])
+    untransformed_bound = bbox_cache.ComputeUntransformedBound(root_prim)
+    aligned_range = untransformed_bound.ComputeAlignedRange()
+
+    if not aligned_range.IsEmpty():
+        size = aligned_range.GetSize()
+        max_dim = max(size[0], size[1], size[2])
+        if max_dim > 0:
+            return max_dim
+
+    # Method 2: Fallback to reading mesh extent attributes directly
+    overall_max_dim = 0.0
+    for descendant in Usd.PrimRange(root_prim):
+        if descendant.IsA(UsdGeom.Mesh):
+            mesh = UsdGeom.Mesh(descendant)
+            extent_attr = mesh.GetExtentAttr()
+            if extent_attr and extent_attr.HasValue():
+                extent = extent_attr.Get()
+                if extent and len(extent) == 2:
+                    size = [extent[1][i] - extent[0][i] for i in range(3)]
+                    overall_max_dim = max(overall_max_dim, max(size))
+
+    return overall_max_dim
+
+
+def validate_and_correct_scale(stage, root_prim, threshold, raw_size=None, applied_scale=None):
+    """
+    Validate final world size after vertex scaling and apply correction if needed.
+
+    Since we now directly scale mesh vertices, we can compute the actual world
+    bound (vertices have been modified, not just transforms).
+
+    Args:
+        stage: The USD stage.
+        root_prim: The root prim to validate.
+        threshold: Maximum allowed world size.
+        raw_size: The original raw geometry size (before scaling).
+        applied_scale: The scale factor that was applied to vertices.
+
+    Returns:
+        tuple: (final_max_dim, correction_applied) where correction_applied is True
+               if additional scaling was needed.
+    """
+    # Compute actual world size from geometry extent (vertices have been modified)
+    actual_world_size = compute_raw_geometry_extent(root_prim)
+
+    # If we have the expected values, also compute expected for comparison
+    if raw_size is not None and applied_scale is not None:
+        expected_world_size = raw_size * applied_scale
+        print(f"    [VALIDATION] Actual world size: {actual_world_size:.3f}m, Expected: {expected_world_size:.3f}m")
+    else:
+        print(f"    [VALIDATION] Actual world size: {actual_world_size:.3f}m")
+
+    # Check if already within threshold
+    if actual_world_size <= threshold:
+        print(f"    [VALIDATION] Size {actual_world_size:.3f}m <= {threshold}m, OK")
+        return (actual_world_size, False)
+
+    # Need additional correction - scale vertices again
+    correction = (threshold / actual_world_size) * 0.95
+    print(f"    [VALIDATION] Size {actual_world_size:.3f}m > {threshold}m, applying vertex correction {correction:.6f}")
+
+    scale_mesh_vertices(root_prim, correction)
+
+    # Update the scale op on root for reference
+    xform = UsdGeom.Xformable(root_prim)
+    scale_op = None
+    for op in xform.GetOrderedXformOps():
+        if op.GetOpType() == UsdGeom.XformOp.TypeScale:
+            scale_op = op
+            break
+
+    if scale_op:
+        current_scale = scale_op.Get()
+        new_scale = (
+            current_scale[0] * correction,
+            current_scale[1] * correction,
+            current_scale[2] * correction
+        )
+        scale_op.Set(new_scale)
+
+    # Calculate final world size after correction
+    final_world_size = actual_world_size * correction
+    print(f"    [VALIDATION] Final size after correction: {final_world_size:.3f}m")
+
+    return (final_world_size, True)
+
+
+def post_process_usd(stage_path, name, scale, semantic_label, source_path, auto_detect_units=False, threshold=50.0):
     """
     Opens the converted USD and adds Physics, Collision, Semantics, Scale, and Material Fallback.
 
@@ -250,7 +392,7 @@ def post_process_usd(stage_path, name, scale, semantic_label, source_path):
     # Open the stage
     stage_utils.open_stage(stage_path)
     stage = omni.usd.get_context().get_stage()
-    
+
     # The converter usually creates a Root Node or just Mesh children.
     root_prim = stage.GetDefaultPrim()
     # If no default prim, find the first valid root Xform or define one
@@ -264,11 +406,49 @@ def post_process_usd(stage_path, name, scale, semantic_label, source_path):
                 root_prim = children[0]
     root_prim_path = root_prim.GetPath()
 
-    # Apply Hybrid Material Strategy
-    texture_application(stage, root_prim_path, source_path)
+    action_taken = "None"
+    detected_size = 0.0
 
-    # Apply Scale
-    # Find or create scale op
+    if auto_detect_units:
+        # Use compute_raw_geometry_extent to get the TRUE raw mesh size
+        # This bypasses any transforms the native converter may have applied
+        raw_size = compute_raw_geometry_extent(root_prim)
+        detected_size = raw_size
+
+        print(f"  [AUTO-SCALE] Raw untransformed size: {raw_size:.3f} (Threshold: {threshold})")
+
+        if raw_size > threshold:
+            action_taken = "Iterative Normalization"
+            # Iteratively reduce by power of 10 until within threshold
+            # This handles mm, cm, or even smaller units (micrometers)
+            temp_scale = 1.0
+            reduced_dim = raw_size
+            while reduced_dim > threshold:
+                temp_scale *= 0.1
+                reduced_dim = raw_size * temp_scale
+
+            scale = scale * temp_scale
+            action_taken += f" (x{temp_scale:.6f})"
+        else:
+            action_taken = "Kept Original"
+
+    # Apply Material Strategy based on source format
+    # OBJ: Uses external MTL + texture files, needs manual texture_application()
+    # GLB/GLTF: Materials and textures are embedded, converter handles automatically
+    source_ext = os.path.splitext(source_path)[1].lower()
+    if source_ext == ".obj":
+        texture_application(stage, root_prim_path, source_path)
+
+    # Apply Scale by directly modifying mesh vertices
+    # Transform-based scaling doesn't work reliably because the native converter
+    # creates USD hierarchies where parent transforms don't propagate to geometry
+    final_scale = (scale, scale, scale)
+
+    if scale != 1.0:
+        print(f"    Scaling mesh vertices by factor: {scale}")
+        scale_mesh_vertices(root_prim, scale)
+
+    # Also set a scale op on root for reference (though it may not affect world bound)
     xform = UsdGeom.Xformable(root_prim)
     scale_op = None
     for op in xform.GetOrderedXformOps():
@@ -277,7 +457,35 @@ def post_process_usd(stage_path, name, scale, semantic_label, source_path):
             break
     if not scale_op:
         scale_op = xform.AddScaleOp()
-    scale_op.Set((scale, scale, scale))
+    scale_op.Set(final_scale)
+
+    # Validate and correct if final world size is still too large
+    # This handles cases where the native converter applied internal transforms
+    # that aren't captured by the raw geometry extent computation
+    final_world_size = 0.0
+    validation_applied = False
+    if auto_detect_units:
+        # Pass the raw size and the scale we just applied so validation can compute
+        # expected world size mathematically (avoiding stale BBoxCache issues)
+        final_world_size, validation_applied = validate_and_correct_scale(
+            stage, root_prim, threshold, detected_size, final_scale[0]
+        )
+        if validation_applied:
+            action_taken += " + Validation Correction"
+            # Get the updated scale op value after validation
+            for op in UsdGeom.Xformable(root_prim).GetOrderedXformOps():
+                if op.GetOpType() == UsdGeom.XformOp.TypeScale:
+                    final_scale = op.Get()
+                    break
+
+    # Explicit Report for User
+    print(f"  [RESULT] Asset: {name}")
+    print(f"           Detected Size: {detected_size:.3f} (Threshold: {threshold})")
+    print(f"           Action: {action_taken}")
+    print(f"           Final Scale: ({final_scale[0]:.6f}, {final_scale[1]:.6f}, {final_scale[2]:.6f})")
+    if auto_detect_units:
+        print(f"           Final World Size: {final_world_size:.3f}m")
+    print(f"           Post-process complete.\n")
 
     # Apply Semantics
     label = semantic_label if semantic_label else name
@@ -303,7 +511,7 @@ def post_process_usd(stage_path, name, scale, semantic_label, source_path):
     stage.GetRootLayer().Save()
     print(f"    Post-process complete for {name}")
 
-async def process_asset_chain(name, source_path, dest_folder, scale, semantic_label):
+async def process_asset_chain(name, source_path, dest_folder, scale, semantic_label, auto_detect_units=False, threshold=50.0):
     """
     Process a single asset through native conversion and post-processing.
 
@@ -319,16 +527,43 @@ async def process_asset_chain(name, source_path, dest_folder, scale, semantic_la
 
     usd_safe_name = name.replace(" ", "_").replace(".", "_")
     output_path = os.path.join(dest_folder, f"{usd_safe_name}.usd")
-    
+
     # Native Conversion
     abs_source = os.path.abspath(str(source_path))
     abs_dest = os.path.abspath(output_path)
-    
+
     success = await convert_asset_native(abs_source, abs_dest)
     if success:
-        post_process_usd(abs_dest, usd_safe_name, scale, semantic_label, abs_source)
+        post_process_usd(abs_dest, usd_safe_name, scale, semantic_label, abs_source, auto_detect_units, threshold)
     else:
         print(f"Skipping post-process for {name} due to conversion failure.")
+
+def clean_label(raw_name, regex_pattern=None, regex_repl=""):
+    """
+    Clean a raw asset name into a semantic label.
+
+    Args:
+        raw_name (str): The raw filename/folder name.
+        regex_pattern (str, optional): Regex pattern to match and remove/replace.
+        regex_repl (str, optional): Replacement string for regex matches.
+
+    Returns:
+        str: Cleaned label suitable for semantic segmentation.
+    """
+    label = raw_name
+
+    # Apply regex replacement if provided
+    if regex_pattern:
+        label = re.sub(regex_pattern, regex_repl, label)
+
+    # Replace common separators with spaces
+    label = label.replace("_", " ").replace("-", " ")
+
+    # Collapse multiple spaces and strip
+    label = " ".join(label.split())
+
+    return label
+
 
 async def run_conversion_async(config):
     """
@@ -339,7 +574,7 @@ async def run_conversion_async(config):
     """
     destination_root = config.get("destination_dir", "./converted_assets")
     assets_config = config.get("assets", [])
-    
+
     if not assets_config:
         print("No assets defined.")
         return
@@ -351,12 +586,25 @@ async def run_conversion_async(config):
         group_type = group.get("type", "directory")
         group_dest = os.path.join(destination_root, group_name)
         base_scale = group.get("scale", 1.0)
+        auto_detect_units = group.get("auto_detect_units", False)
+        threshold = group.get("auto_detection_threshold", 50.0)
         
+        print(f"  Group '{group_name}' using scale: {base_scale}. Auto-Detect Units: {auto_detect_units}")
+
+        # Supported mesh formats for conversion
+        supported_extensions = [".obj", ".glb", ".gltf", ".fbx"]
+
+        # Get regex options for label cleaning
+        regex_pattern = group.get("regex_replace_pattern")
+        regex_repl = group.get("regex_replace_repl", "")
+
         targets = []
         if group_type == "glob":
             search_pattern = group.get("search_pattern")
             name_depth = group.get("name_depth", 1)
-            files = sorted(glob.glob(search_pattern, recursive=True))
+            all_files = sorted(glob.glob(search_pattern, recursive=True))
+            # Filter to only supported mesh formats
+            files = [f for f in all_files if os.path.splitext(f)[1].lower() in supported_extensions]
             for file_path in files:
                 path_obj = Path(file_path)
                 try:
@@ -366,24 +614,30 @@ async def run_conversion_async(config):
                         asset_name = path_obj.parents[name_depth - 1].name
                 except:
                     asset_name = path_obj.stem
-                
+
                 targets.append({
-                    "name": asset_name, 
-                    "path": file_path, 
-                    "label": asset_name.replace("_", " ")
+                    "name": asset_name,
+                    "path": file_path,
+                    "label": clean_label(asset_name, regex_pattern, regex_repl)
                 })
         elif group_type == "directory":
             src_path = group.get("path")
             mesh_rel_raw = group.get("mesh_relative_path", "")
-            
+
             candidate_rels = []
             if isinstance(mesh_rel_raw, list):
                 candidate_rels = mesh_rel_raw
             else:
                 # Default hardcoded preference if not specified, or just use the single provided one
                 if not mesh_rel_raw:
-                     # If config doesn't specify, default to our YCB logic
-                     candidate_rels = ["google_512k/textured.obj", "tsdf/textured.obj"]
+                    # If config doesn't specify, default to our YCB logic + common GLB patterns
+                    candidate_rels = [
+                        "google_512k/textured.obj",
+                        "tsdf/textured.obj",
+                        "model.glb",  # Common GLB naming conventions
+                        "mesh.glb",
+                        "scene.gltf",
+                    ]
                 else:
                     candidate_rels = [mesh_rel_raw]
 
@@ -400,21 +654,24 @@ async def run_conversion_async(config):
                     
                     if found_mesh:
                         targets.append({
-                            "name": folder.name, 
-                            "path": str(found_mesh.absolute()), 
-                            "label": folder.name
+                            "name": folder.name,
+                            "path": str(found_mesh.absolute()),
+                            "label": clean_label(folder.name, regex_pattern, regex_repl)
                         })
                     else:
                          print(f"    Warning: No valid mesh found for {folder.name} in candidates: {candidate_rels}")
         elif group_type == "list":
-             items = group.get("items", [])
-             for item in items:
-                 targets.append({
-                     "name": item.get("name", "unknown"),
-                     "path": item.get("path"),
-                     "label": item.get("name"),
-                     "scale": item.get("scale", base_scale) # Override scale
-                 })
+            items = group.get("items", [])
+            for item in items:
+                item_name = item.get("name", "unknown")
+                # Use explicit label if provided, otherwise clean the name
+                item_label = item.get("label") or clean_label(item_name, regex_pattern, regex_repl)
+                targets.append({
+                    "name": item_name,
+                    "path": item.get("path"),
+                    "label": item_label,
+                    "scale": item.get("scale", base_scale)  # Override scale
+                })
 
         # Launch Tasks
         for t in targets:
@@ -422,15 +679,19 @@ async def run_conversion_async(config):
             if safe_name and safe_name[0].isdigit():
                 safe_name = f"_{safe_name}"
             s = t.get("scale", base_scale)
-            await process_asset_chain(safe_name, t["path"], group_dest, s, t["label"])
+            await process_asset_chain(safe_name, t["path"], group_dest, s, t["label"], auto_detect_units, threshold)
             
     print("All conversions completed.")
 
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description="Convert OBJ/GLB/GLTF/FBX meshes to USD with physics and semantics.",
+        epilog="Example configs: config/obj_assets_config.yaml, config/glb_assets_config.yaml"
+    )
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    default_config = os.path.join(script_dir, "config/assets_config.yaml")
-    parser.add_argument("--config", type=str, default=default_config)
+    default_config = os.path.join(script_dir, "config/obj_assets_config.yaml")
+    parser.add_argument("--config", type=str, default=default_config,
+                        help="Path to config YAML (default: config/obj_assets_config.yaml)")
     args = parser.parse_args()
 
     config = load_config(args.config)

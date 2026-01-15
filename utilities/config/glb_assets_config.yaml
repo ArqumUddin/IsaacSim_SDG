@@ -1,0 +1,33 @@
+# GLB/GLTF Asset Ingestion Configuration
+# Used by convert_objects.py to convert GLB/GLTF files to USD assets with Physics and Semantics.
+#
+# GLB/GLTF files are self-contained - textures and materials are embedded.
+# No external texture files needed (unlike OBJ which requires MTL + texture files).
+
+# Global settings
+destination_dir: "/home/ubuntu/Workspace/data/glb_converted" # Where to save the converted USDs
+
+assets:
+  # Example 1: Glob pattern with regex label cleaning
+  # Good for files like "03_canon_at-1_retro_camera.glb" -> "canon at 1 retro camera"
+  - name: "my_glb_models"
+    type: "glob"
+    search_pattern: "/home/ubuntu/Workspace/data/container_scene_objects/**/*.glb" # Recursive search
+    # name_depth controls asset naming:
+    #   0 = use filename (e.g., "chair.glb" -> "chair")
+    #   1 = use immediate parent folder name
+    #   2 = use grandparent folder name
+    name_depth: 0 # Use the GLB filename for naming
+    scale: 1.0
+
+    # Auto-Normalization for Mixed Units
+    # If true, objects larger than 'auto_detection_threshold' (in world units)
+    # will be assumed to be in millimeters and scaled by 0.001.
+    auto_detect_units: true
+    auto_detection_threshold: 1.0
+
+    # Regex for cleaning semantic labels (applied to filename/folder name)
+    # This pattern removes leading numbers, dashes, and underscores
+    # Example: "03_canon_at-1_retro_camera" -> "canon at 1 retro camera"
+    regex_replace_pattern: "^[0-9_-]+"
+    regex_replace_repl: ""
