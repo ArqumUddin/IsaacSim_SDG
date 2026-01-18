@@ -520,14 +520,22 @@ class ObjectBasedSDG:
         consistency - IDs are assigned based on alphabetical order of labels.
         """
         import json
+        import glob
 
         writer_kwargs = self.config.get("writer_kwargs", {})
         output_dir = writer_kwargs.get("output_dir", "")
 
-        coco_file = os.path.join(output_dir, "coco_annotations.json")
-        if not os.path.exists(coco_file):
-            print(f"[SDG] COCO file not found: {coco_file}")
+        # CocoWriter outputs with random suffix (e.g., coco_annotations_xncoejgm.json)
+        # Find the most recent matching file
+        coco_pattern = os.path.join(output_dir, "coco_annotations*.json")
+        coco_files = glob.glob(coco_pattern)
+        if not coco_files:
+            print(f"[SDG] No COCO files found matching: {coco_pattern}")
             return
+
+        # Use the most recently modified file
+        coco_file = max(coco_files, key=os.path.getmtime)
+        print(f"[SDG] Processing COCO file: {os.path.basename(coco_file)}")
 
         with open(coco_file, 'r') as f:
             coco_data = json.load(f)
