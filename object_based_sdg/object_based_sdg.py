@@ -44,6 +44,8 @@ from isaacsim.core.utils.semantics import add_labels, remove_labels, upgrade_pri
 from isaacsim.storage.native import get_assets_root_path
 from omni.physx import get_physx_interface, get_physx_scene_query_interface
 from pxr import Gf, PhysxSchema, Sdf, UsdGeom, UsdPhysics
+import math
+from pxr import UsdLux
 
 import object_based_sdg_utils
 
@@ -274,6 +276,10 @@ class ObjectBasedSDG:
 
         print(f"[SDG] Spawning {len(selected)} randomly selected assets")
 
+        # Use full working area centered at origin
+        spawn_loc_min = self.working_area_min
+        spawn_loc_max = self.working_area_max
+
         # 4. Spawn each selected asset
         for obj in selected:
             obj_url = obj.get("url", "")
@@ -284,7 +290,7 @@ class ObjectBasedSDG:
             scale_min_max = obj.get("scale_min_max", (1, 1))
 
             rand_loc, rand_rot, rand_scale = object_based_sdg_utils.get_random_transform_values(
-                loc_min=self.working_area_min, loc_max=self.working_area_max, scale_min_max=scale_min_max
+                loc_min=spawn_loc_min, loc_max=spawn_loc_max, scale_min_max=scale_min_max
             )
 
             prim_path = omni.usd.get_stage_next_free_path(self.stage, f"/World/Labeled/{label}", False)
@@ -385,9 +391,19 @@ class ObjectBasedSDG:
 
         num_cameras = self.config.get("num_cameras", 1)
         camera_props = self.config.get("camera_properties_kwargs", {})
-        
+
+        # Get focal length from camera_positioning config (must match FOV calculation)
+        camera_config = self.config.get("camera_positioning", {})
+        focal_length = camera_config.get("focal_length", 35.0)  # mm
+        print(f"[SDG] Creating {num_cameras} cameras with focal length: {focal_length}mm")
+
         for i in range(num_cameras):
             cam_prim = self.stage.DefinePrim(f"/World/Cameras/cam_{i}", "Camera")
+
+            # Set focal length to match FOV calculations (critical for background plane sizing)
+            if cam_prim.HasAttribute("focalLength"):
+                cam_prim.GetAttribute("focalLength").Set(focal_length)
+
             for key, value in camera_props.items():
                 if cam_prim.HasAttribute(key):
                     cam_prim.GetAttribute(key).Set(value)
@@ -544,6 +560,250 @@ class ObjectBasedSDG:
         else:
             print(f"[SDG] All {len(coco_data['categories'])} categories already present")
 
+    def _load_png_backgrounds(self):
+        """
+        Load PNG background images from config folder, sampling every Nth.
+
+        Returns:
+            list: List of absolute paths to sampled PNG images.
+        """
+        import glob
+
+        bg_config = self.config.get("png_background", {})
+        if not bg_config.get("enabled", False):
+            return []
+
+        folder = bg_config.get("folder", "")
+        if not folder or not os.path.isdir(folder):
+            print(f"[SDG] PNG background folder not found: {folder}")
+            return []
+
+        sample_n = bg_config.get("sample_every_n", 1)
+
+        # Get all PNGs sorted by name
+        pattern = os.path.join(folder, "*.png")
+        all_images = sorted(glob.glob(pattern))
+
+        if not all_images:
+            print(f"[SDG] No PNG files found in: {folder}")
+            return []
+
+        # Sample every Nth image
+        sampled = all_images[::sample_n]
+
+        print(f"[SDG] PNG backgrounds: {len(sampled)} images (sampled every {sample_n} from {len(all_images)} total)")
+        return sampled
+
+    def _calculate_camera_fov(self):
+        """
+        Calculate camera horizontal and vertical FOV from focal length and resolution.
+
+        Uses:
+        - focal_length from camera_positioning config (default 35mm)
+        - resolution from config for aspect ratio
+        - 36mm sensor width (USD full-frame standard)
+
+        Returns:
+            tuple: (fov_horizontal, fov_vertical) in radians.
+        """
+        import math
+
+        # Get focal length from config (default 35mm)
+        camera_config = self.config.get("camera_positioning", {})
+        focal_length = camera_config.get("focal_length", 35.0)  # mm
+
+        # USD camera uses 36mm sensor width (full frame equivalent)
+        sensor_width = 36.0  # mm
+
+        # Get resolution for aspect ratio
+        resolution = self.config.get("resolution", [640, 640])
+        aspect_ratio = resolution[0] / resolution[1]  # width / height
+
+        # Calculate horizontal FOV
+        fov_h = 2 * math.atan(sensor_width / (2 * focal_length))
+
+        # Calculate vertical FOV based on aspect ratio
+        sensor_height = sensor_width / aspect_ratio
+        fov_v = 2 * math.atan(sensor_height / (2 * focal_length))
+
+        return fov_h, fov_v
+
+    def create_png_background_plane(self, image_path: str):
+        """
+        Create a single flat backdrop plane behind the working area (studio-style setup).
+
+        The plane is sized to match the camera's field of view at its distance,
+        ensuring the entire background is visible in frame.
+        Camera will be constrained to +Z side looking toward -Z (at the backdrop).
+
+        Args:
+            image_path: Path to PNG image file.
+
+        Returns:
+            Usd.Prim: The background plane prim.
+        """
+
+        prim_path = "/World/BackgroundPlane"
+
+        # Get working area dimensions
+        wx, wy, wz = self.working_area_size
+
+        # Position plane behind working area (at -Z)
+        # backdrop_distance controls how far behind the working area edge the plane is placed
+        bg_config = self.config.get("png_background", {})
+        backdrop_distance = bg_config.get("backdrop_distance", 1.0)
+        plane_z = -(wz / 2 + backdrop_distance)
+
+        # Calculate MAXIMUM distance from camera to plane
+        # This ensures the plane fills the frame for the camera furthest away
+        # In studio mode: camera at Z = distance, plane at Z = plane_z
+        cam_dist_max = self.config.get("camera_distance_to_target_min_max", [0.75, 1.5])[1]
+        # Camera at maximum distance from origin, looking at plane
+        camera_to_plane_distance = cam_dist_max + abs(plane_z)
+
+        # Calculate visible area using FOV and resolution
+        fov_h, fov_v = self._calculate_camera_fov()
+        visible_width = 2 * camera_to_plane_distance * math.tan(fov_h / 2)
+        visible_height = 2 * camera_to_plane_distance * math.tan(fov_v / 2)
+
+        # Size plane to fill frame for furthest camera, with margin for safety
+        # Margin ensures full coverage even with slight camera angle variations
+        plane_margin = bg_config.get("plane_margin", 1.0)  # 1.0 = exact fit at max camera distance
+        plane_width = visible_width * plane_margin
+        plane_height = visible_height * plane_margin
+
+        print(f"[SDG] Background plane: {plane_width:.2f}x{plane_height:.2f}m at Z={plane_z:.1f} (camera-to-plane: {camera_to_plane_distance:.2f}m, margin: {plane_margin})")
+
+        # Delete existing plane if present (ensures config changes take effect)
+        plane_prim = self.stage.GetPrimAtPath(prim_path)
+        if plane_prim.IsValid():
+            self.stage.RemovePrim(prim_path)
+            print(f"[SDG] Removed existing backdrop plane for recreation")
+
+        plane_prim = self.stage.GetPrimAtPath(prim_path)
+        if not plane_prim.IsValid():
+            # Create single backdrop plane facing +Z (toward camera)
+            plane_mesh = UsdGeom.Mesh.Define(self.stage, prim_path)
+
+            hw, hh = plane_width / 2, plane_height / 2
+            points = [
+                (-hw, -hh, plane_z),  # Bottom-left
+                (hw, -hh, plane_z),   # Bottom-right
+                (hw, hh, plane_z),    # Top-right
+                (-hw, hh, plane_z),   # Top-left
+            ]
+
+            # Simple 1:1 UV mapping (no tiling - preserves resolution)
+            uvs = [(0, 0), (1, 0), (1, 1), (0, 1)]
+            face_vertex_counts = [4]
+            face_vertex_indices = [0, 1, 2, 3]
+
+            plane_mesh.GetPointsAttr().Set(points)
+            plane_mesh.GetFaceVertexCountsAttr().Set(face_vertex_counts)
+            plane_mesh.GetFaceVertexIndicesAttr().Set(face_vertex_indices)
+
+            # Set UVs
+            primvars_api = UsdGeom.PrimvarsAPI(plane_mesh)
+            texcoord_primvar = primvars_api.CreatePrimvar(
+                "st", Sdf.ValueTypeNames.TexCoord2fArray, UsdGeom.Tokens.vertex
+            )
+            texcoord_primvar.Set(uvs)
+
+            plane_mesh.GetDoubleSidedAttr().Set(True)
+            plane_prim = plane_mesh.GetPrim()
+
+            # Add collision so objects can't pass through the backdrop
+            object_based_sdg_utils.add_colliders(plane_prim)
+
+            print(f"[SDG] Created backdrop plane: {plane_width:.1f}x{plane_height:.1f}m at Z={plane_z:.1f}")
+
+        # Set texture
+        self._set_plane_texture(prim_path, image_path)
+
+        # Create ambient dome light for scene illumination
+        dome_path = "/World/AmbientDome"
+        if not self.stage.GetPrimAtPath(dome_path).IsValid():
+            dome = UsdLux.DomeLight.Define(self.stage, dome_path)
+            dome.GetIntensityAttr().Set(500.0)
+            print(f"[SDG] Created ambient dome light for scene illumination")
+
+        return plane_prim
+
+    def _set_plane_texture(self, plane_path: str, image_path: str):
+        """
+        Set or update the texture on the background plane.
+
+        Args:
+            plane_path: USD path to the plane prim.
+            image_path: Path to PNG image file.
+        """
+        from pxr import UsdShade
+
+        mat_path = f"{plane_path}/Material"
+        tex_path = f"{mat_path}/DiffuseTexture"
+
+        # Check if material exists
+        mat_prim = self.stage.GetPrimAtPath(mat_path)
+        if not mat_prim.IsValid():
+            # Create material
+            material = UsdShade.Material.Define(self.stage, mat_path)
+
+            # Create primvar reader to get UV coordinates from mesh
+            st_reader = UsdShade.Shader.Define(self.stage, f"{mat_path}/STReader")
+            st_reader.CreateIdAttr("UsdPrimvarReader_float2")
+            st_reader.CreateInput("varname", Sdf.ValueTypeNames.Token).Set("st")
+            st_reader.CreateOutput("result", Sdf.ValueTypeNames.Float2)
+
+            # Create texture reader
+            tex_reader = UsdShade.Shader.Define(self.stage, tex_path)
+            tex_reader.CreateIdAttr("UsdUVTexture")
+            tex_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(image_path)
+            tex_reader.CreateInput("wrapS", Sdf.ValueTypeNames.Token).Set("clamp")
+            tex_reader.CreateInput("wrapT", Sdf.ValueTypeNames.Token).Set("clamp")
+            # Connect UV coordinates from primvar reader
+            tex_reader.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(
+                st_reader.GetOutput("result")
+            )
+            tex_reader.CreateOutput("rgb", Sdf.ValueTypeNames.Float3)
+
+            # Create shader - fully emissive so background glows regardless of lighting
+            shader = UsdShade.Shader.Define(self.stage, f"{mat_path}/Shader")
+            shader.CreateIdAttr("UsdPreviewSurface")
+            shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(1.0)
+            shader.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(0.0)
+
+            # Set diffuse to black so background is not affected by scene lighting
+            shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set((0.0, 0.0, 0.0))
+
+            # Connect texture to emissive only - background is self-lit and unaffected by lights
+            shader.CreateInput("emissiveColor", Sdf.ValueTypeNames.Color3f).ConnectToSource(
+                tex_reader.GetOutput("rgb")
+            )
+
+            # Connect shader to material
+            material.CreateSurfaceOutput().ConnectToSource(shader.ConnectableAPI(), "surface")
+
+            # Bind material to plane
+            plane_prim = self.stage.GetPrimAtPath(plane_path)
+            UsdShade.MaterialBindingAPI(plane_prim).Bind(material)
+        else:
+            # Update texture file path
+            tex_reader = UsdShade.Shader.Get(self.stage, tex_path)
+            file_input = tex_reader.GetInput("file")
+            if file_input:
+                file_input.Set(image_path)
+
+    def _update_skybox_texture(self, image_path: str):
+        """
+        Update texture on the backdrop plane.
+
+        Args:
+            image_path: Path to PNG image file.
+        """
+        prim_path = "/World/BackgroundPlane"
+        if self.stage.GetPrimAtPath(prim_path).IsValid():
+            self._set_plane_texture(prim_path, image_path)
+
     def setup_randomizers(self):
         """
         Defines Replicator Randomizers and Triggers.
@@ -573,10 +833,12 @@ class ObjectBasedSDG:
             l_type = light_cfg.get("type", "Sphere")
             l_int_min, l_int_max = light_cfg.get("intensity_min_max", (30000, 40000))
             l_temp_min, l_temp_max = light_cfg.get("temperature_min_max", (6000, 7000))
+            l_color_min = tuple(light_cfg.get("color_min", (0, 0, 0)))
+            l_color_max = tuple(light_cfg.get("color_max", (1, 1, 1)))
 
             rep.create.light(
                 light_type=l_type,
-                color=rep.distribution.uniform((0, 0, 0), (1, 1, 1)),
+                color=rep.distribution.uniform(l_color_min, l_color_max),
                 temperature=rep.distribution.normal((l_temp_min + l_temp_max)/2, (l_temp_max - l_temp_min)/4),
                 intensity=rep.distribution.normal((l_int_min + l_int_max)/2, (l_int_max - l_int_min)/4),
                 position=rep.distribution.uniform(self.working_area_min, self.working_area_max),
@@ -584,18 +846,30 @@ class ObjectBasedSDG:
                 count=l_count,
             )
 
-        # Dome Background
-        with rep.trigger.on_custom_event(event_name="randomize_dome_background"):
-            textures = [
-                self.assets_root_path + "/NVIDIA/Assets/Skies/Indoor/autoshop_01_4k.hdr",
-                self.assets_root_path + "/NVIDIA/Assets/Skies/Indoor/carpentry_shop_01_4k.hdr",
-                self.assets_root_path + "/NVIDIA/Assets/Skies/Indoor/hotel_room_4k.hdr",
-                self.assets_root_path + "/NVIDIA/Assets/Skies/Indoor/wooden_lounge_4k.hdr",
-            ]
-            dome_light = rep.create.light(light_type="Dome")
-            with dome_light:
-                rep.modify.attribute("inputs:texture:file", rep.distribution.choice(textures))
-                rep.randomizer.rotation()
+        # PNG Background using DomeLight (if enabled)
+        bg_config = self.config.get("png_background", {})
+        png_enabled = bg_config.get("enabled", False)
+
+        if png_enabled:
+            # Load PNG images and create textured background plane
+            self.png_background_images = self._load_png_backgrounds()
+            if self.png_background_images:
+                initial_image = random.choice(self.png_background_images)
+                self.create_png_background_plane(initial_image)
+                print(f"[SDG] Initial PNG background: {os.path.basename(initial_image)}")
+        else:
+            # Original HDRI dome behavior (only when PNG not enabled)
+            with rep.trigger.on_custom_event(event_name="randomize_dome_background"):
+                textures = [
+                    self.assets_root_path + "/NVIDIA/Assets/Skies/Indoor/autoshop_01_4k.hdr",
+                    self.assets_root_path + "/NVIDIA/Assets/Skies/Indoor/carpentry_shop_01_4k.hdr",
+                    self.assets_root_path + "/NVIDIA/Assets/Skies/Indoor/hotel_room_4k.hdr",
+                    self.assets_root_path + "/NVIDIA/Assets/Skies/Indoor/wooden_lounge_4k.hdr",
+                ]
+                dome_light = rep.create.light(light_type="Dome")
+                with dome_light:
+                    rep.modify.attribute("inputs:texture:file", rep.distribution.choice(textures))
+                    rep.randomizer.rotation()
 
         # Asset Appearance
         if self.config.get("assets", {}).get("properties", {}).get("randomize_color", False) and self.labeled_prims:
@@ -656,26 +930,46 @@ class ObjectBasedSDG:
     def randomize_camera_poses(self):
         """
         Randomizes camera positions looking at assets.
-        
-        For each camera:
-        1. Selects a random target asset (labeled prim).
-        2. Applies a small random offset to the target point so it's not perfectly centered.
-        3. Positions the camera at a random distance on a spherical surface around the target.
+
+        Supports two modes:
+        - "sphere" (default): Camera on random point on sphere around target
+        - "studio": Camera constrained to +Z hemisphere facing backdrop (for PNG backgrounds)
         """
+        import math
+
         min_dist, max_dist = self.config.get("camera_distance_to_target_min_max", (0.1, 0.5))
         offset = self.config.get("camera_look_at_target_offset", 0.2)
 
+        # Check for studio mode (when PNG background is enabled)
+        bg_config = self.config.get("png_background", {})
+        camera_config = self.config.get("camera_positioning", {})
+        studio_mode = bg_config.get("enabled", False) or camera_config.get("mode") == "studio"
+
         for cam in self.cameras:
-            target_asset = random.choice(self.labeled_prims)
-            loc_offset = (
-                random.uniform(-offset, offset),
-                random.uniform(-offset, offset),
-                random.uniform(-offset, offset),
-            )
-            target_loc = target_asset.GetAttribute("xformOp:translate").Get() + loc_offset
             distance = random.uniform(min_dist, max_dist)
-            cam_loc, quat = object_based_sdg_utils.get_random_pose_on_sphere(origin=target_loc, radius=distance)
-            object_based_sdg_utils.set_transform_attributes(cam, location=cam_loc, orientation=quat)
+
+            if studio_mode:
+                # Studio mode: camera at center (0, 0, distance) looking straight at backdrop
+                # Camera is centered with background plane, looking down -Z axis
+                cam_loc = Gf.Vec3f(0, 0, distance)
+
+                # Camera looks straight down -Z axis (toward background)
+                # No rotation needed - USD camera default forward is -Z
+                # Set rotation to identity quaternion (no rotation)
+                quat = Gf.Quatf(1, 0, 0, 0)  # Identity quaternion (w, x, y, z)
+
+                object_based_sdg_utils.set_transform_attributes(cam, location=cam_loc, orientation=quat)
+            else:
+                # Default sphere mode - camera orbits around target
+                target_asset = random.choice(self.labeled_prims)
+                loc_offset = (
+                    random.uniform(-offset, offset),
+                    random.uniform(-offset, offset),
+                    random.uniform(-offset, offset),
+                )
+                target_loc = target_asset.GetAttribute("xformOp:translate").Get() + loc_offset
+                cam_loc, quat = object_based_sdg_utils.get_random_pose_on_sphere(origin=target_loc, radius=distance)
+                object_based_sdg_utils.set_transform_attributes(cam, location=cam_loc, orientation=quat)
 
     def simulate_camera_collision(self, frames=1):
         """
@@ -803,6 +1097,7 @@ class ObjectBasedSDG:
         interval_lights = intervals.get("lights", 5)
         interval_shape_colors = intervals.get("shape_colors", 15)
         interval_dome = intervals.get("dome_background", 25)
+        interval_png_bg = intervals.get("png_background", 25)
         interval_asset_reselection = intervals.get("asset_reselection", 25)
         interval_distractor_vel = intervals.get("distractor_velocities", 17)
         interval_motion_blur = intervals.get("motion_blur_capture", 5)
@@ -840,6 +1135,13 @@ class ObjectBasedSDG:
             # 5. Dome Background
             if interval_dome > 0 and i % interval_dome == 0:
                 rep.utils.send_og_event(event_name="randomize_dome_background")
+
+            # 5b. PNG Background (if enabled)
+            if interval_png_bg > 0 and i % interval_png_bg == 0:
+                if hasattr(self, 'png_background_images') and self.png_background_images:
+                    new_image = random.choice(self.png_background_images)
+                    self._update_skybox_texture(new_image)
+                    print(f"[SDG] Changed PNG background to: {os.path.basename(new_image)}")
 
             # 6. Asset Re-selection (can be tied to dome or independent)
             if interval_asset_reselection > 0 and i % interval_asset_reselection == 0:

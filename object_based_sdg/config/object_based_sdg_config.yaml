@@ -6,17 +6,34 @@ launch_config:
   headless: true
 env_url: ""
 working_area_size:
-  - 2
-  - 2
-  - 2
+  - 1
+  - 1
+  - 1
 light_config:
   count: 4
   type: "Sphere"
-  intensity_min_max: [30000, 40000]
+  intensity_min_max: [10000, 20000]
   temperature_min_max: [6000, 7000]
   distant_light_intensity_min_max: [300, 600]
+  color_min: [0, 0, 0] # RGB min values (0-1)
+  color_max: [1, 1, 1] # RGB max values (0-1)
+
+# PNG background settings (studio-style flat backdrop)
+png_background:
+  enabled: true
+  folder: "/home/ubuntu/Workspace/data/extracted_frames/arqum_full_sized_original_video"
+  sample_every_n: 50 # Only use every Nth image (1 = all images)
+  backdrop_distance: 4.0 # Distance (meters) behind working area to place backdrop (increase to push further back)
+  plane_margin: 1.0 # Multiplier for plane size (1.0 = exact fit at max camera distance, >1.0 = extra coverage)
+
+# Camera positioning (used when png_background is enabled)
+camera_positioning:
+  mode: "studio" # "studio" = cameras face backdrop, "sphere" = cameras around objects
+  angle_variation: 0 # Degrees off-perpendicular (0 = camera looks straight at backdrop)
+  focal_length: 35.0 # Camera focal length in mm (affects FOV and background plane sizing)
+
 rt_subframes: 4
-num_frames: 100
+num_frames: 500
 num_cameras: 4
 disable_render_products_between_captures: false
 camera_collider_radius: 0.2
@@ -30,6 +47,7 @@ randomization_intervals:
   lights: 5 # Randomize lights every N frames
   shape_colors: 15 # Randomize shape distractor colors every N frames
   dome_background: 25 # Change dome/environment every N frames
+  png_background: 10 # Change PNG background every N frames (only if png_background.enabled)
   asset_reselection: 25 # Re-select random assets every N frames (0 = only on dome change)
   distractor_velocities: 17 # Randomize floating distractor velocities every N frames
   motion_blur_capture: 0 # Use motion blur capture every N frames (other frames use standard capture)
@@ -43,12 +61,12 @@ motion_blur:
   num_samples: 8
 spp: 128
 resolution:
-  - 640
+  - 480
   - 640
 camera_look_at_target_offset: 0.15
 camera_distance_to_target_min_max:
+  - 1
   - 1.5
-  - 2.5
 writer_type: "CocoWriter"
 writer_kwargs:
   output_dir: "/home/ubuntu/Workspace/data/object_based_sdg_data"
@@ -64,13 +82,13 @@ labeled_assets:
   # Labeled assets (scanned from folders with auto-labeling)
   auto_label:
     num: 10
-    gravity_disabled_chance: 1.0
+    gravity_disabled_chance: 0.0
     folders:
       - "/home/ubuntu/Workspace/data/glb_converted/my_glb_models"
     files: []
     regex_replace_pattern: "^[_0-9-]+"
     regex_replace_repl: ""
-    scale_min_max: [0.5, 0.65]
+    scale_min_max: [0.2, 0.4]
     randomize_color: false
 
 shape_distractors_types:
