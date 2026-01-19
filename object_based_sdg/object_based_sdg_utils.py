@@ -330,10 +330,10 @@ def scan_assets(folders=None, files=None, recursive=False, regex_replace_pattern
             raw_name = f.stem
             # Apply regex replacement if provided
             if regex_replace_pattern:
-                clean_label = re.sub(regex_replace_pattern, regex_replace_repl, raw_name)
+                clean_label = re.sub(regex_replace_pattern, regex_replace_repl, raw_name).strip()
             else:
                 clean_label = raw_name
-            
+
             loaded_assets.append({"url": url, "label": clean_label})
             seen_urls.add(url)
 
@@ -354,10 +354,10 @@ def scan_assets(folders=None, files=None, recursive=False, regex_replace_pattern
         # Extract filename for label
         raw_name = f.stem
         if regex_replace_pattern:
-            clean_label = re.sub(regex_replace_pattern, regex_replace_repl, raw_name)
+            clean_label = re.sub(regex_replace_pattern, regex_replace_repl, raw_name).strip()
         else:
             clean_label = raw_name
-            
+
         loaded_assets.append({"url": url, "label": clean_label})
         seen_urls.add(url)
 

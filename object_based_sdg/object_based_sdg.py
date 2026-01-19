@@ -4,13 +4,13 @@
 import argparse
 import json
 import os
+import re
 import yaml
 import carb
 import random
 import time
 from itertools import chain
 import carb.settings
-from pathlib import Path
 
 # Isaac Sim specific imports
 from isaacsim import SimulationApp
@@ -234,7 +234,9 @@ class ObjectBasedSDG:
         # This ensures the writer has all possible categories, even if not all are spawned initially
         for asset in self.available_assets:
             label = asset.get("label", "unknown")
-            self.unique_labels.add(label)
+            # Sanitize label for semantic system (no spaces allowed in Isaac Sim labeling)
+            semantic_label = label.replace(" ", "_")
+            self.unique_labels.add(semantic_label)
         print(f"[SDG] Total unique labels in pool: {len(self.unique_labels)}")
 
         # Spawn initial random selection
@@ -293,7 +295,9 @@ class ObjectBasedSDG:
                 loc_min=spawn_loc_min, loc_max=spawn_loc_max, scale_min_max=scale_min_max
             )
 
-            prim_path = omni.usd.get_stage_next_free_path(self.stage, f"/World/Labeled/{label}", False)
+            # Sanitize label for USD prim path (replace spaces and special chars with underscores)
+            prim_name = re.sub(r'[^a-zA-Z0-9_]', '_', label).strip()
+            prim_path = omni.usd.get_stage_next_free_path(self.stage, f"/World/Labeled/{prim_name}", False)
             prim = self.stage.DefinePrim(prim_path, "Xform")
 
             if obj_url.startswith("omniverse://") or os.path.isabs(obj_url):
@@ -305,8 +309,10 @@ class ObjectBasedSDG:
             object_based_sdg_utils.set_transform_attributes(prim, location=rand_loc, rotation=rand_rot, scale=rand_scale)
             object_based_sdg_utils.add_colliders(prim)
             object_based_sdg_utils.add_rigid_body_dynamics(prim, disable_gravity=floating)
-            add_labels(prim, labels=[label], instance_name="class")
-            self.unique_labels.add(label)
+            # Sanitize label for semantic system (no spaces allowed in Isaac Sim labeling)
+            semantic_label = label.replace(" ", "_")
+            add_labels(prim, labels=[semantic_label], instance_name="class")
+            self.unique_labels.add(semantic_label)
 
             if floating:
                 self.floating_labeled_prims.append(prim)
@@ -502,7 +508,7 @@ class ObjectBasedSDG:
             color = [random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)]
 
             categories[label] = {
-                "name": label,
+                "name": label.replace("_", " "),
                 "id": cat_id,
                 "supercategory": supercategory,
                 "isthing": 1,
@@ -550,10 +556,11 @@ class ObjectBasedSDG:
         # Add missing categories with their ORIGINAL IDs
         added = 0
         for label, cat_info in all_categories.items():
-            if label not in existing_names:
+            human_readable_name = label.replace("_", " ")
+            if human_readable_name not in existing_names:
                 coco_data['categories'].append({
                     "id": cat_info["id"],  # Use original deterministic ID
-                    "name": label,
+                    "name": human_readable_name,
                     "supercategory": cat_info.get("supercategory", "object")
                 })
                 added += 1
