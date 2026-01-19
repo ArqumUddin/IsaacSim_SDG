@@ -86,8 +86,8 @@ labeled_assets:
     folders:
       - "/home/ubuntu/Workspace/data/glb_converted/my_glb_models"
     files: []
-    regex_replace_pattern: "^[_0-9-]+"
-    regex_replace_repl: ""
+    regex_replace_pattern: "[_0-9-]"
+    regex_replace_repl: " "
     scale_min_max: [0.2, 0.4]
     randomize_color: false
 
